@@ -1,0 +1,14 @@
+{
+  "name": "player-performance-analysis",
+  "version": "0.1.0",
+  "description": "PIR (Player Impact above Replacement): a z-score-based composite skater impact metric for the SHL/SMJHL, computed from the league own live JSON API.",
+  "type": "module",
+  "main": "index.js",
+  "private": true,
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-exclude=test/**"
+  },
+  "engines": { "node": ">=24" }
+}
