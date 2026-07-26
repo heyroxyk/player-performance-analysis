@@ -5,7 +5,7 @@
 // path join in store.js, so an unvalidated value reaching that join would be a real
 // path-safety bug, not just a display glitch.
 
-import { parseNonNegativeInteger, validateOptions, VALID_BASELINES, VALID_FORMATS } from '../commands.js';
+import { parseNonNegativeInteger, validateOptions, VALID_BASELINES, VALID_FORMATS, VALID_STATUSES } from '../commands.js';
 import { HttpError } from './httpUtil.js';
 
 function wrapAsBadRequest(fn) {
@@ -52,6 +52,14 @@ function parseBaselineParam(rawValue) {
   return baseline;
 }
 
+// undefined maps to 'all' -- permissive by default, matching parseBaselineParam above: an
+// omitted --status must never silently narrow a leaderboard the caller didn't ask to narrow.
+function parseStatusParam(rawValue) {
+  const status = rawValue ?? 'all';
+  wrapAsBadRequest(() => validateOptions({ league: 0, status }));
+  return status;
+}
+
 function parseMovementParam(rawValue) {
   return rawValue !== 'false';
 }
@@ -68,7 +76,7 @@ function parseWindowParam(rawValue) {
   return windowGames;
 }
 
-const KNOWN_RANK_PARAMS = new Set(['league', 'season', 'baseline', 'movement', 'shrink', 'window']);
+const KNOWN_RANK_PARAMS = new Set(['league', 'season', 'baseline', 'movement', 'shrink', 'window', 'status']);
 const KNOWN_EXPORT_PARAMS = new Set([...KNOWN_RANK_PARAMS, 'format', 'top']);
 
 function rejectUnknownParams(searchParams, known) {
@@ -82,7 +90,7 @@ function rejectUnknownParams(searchParams, known) {
 /**
  * Parses and validates query params shared by /api/rank and /api/snapshots-scoped routes.
  * @param {URLSearchParams} searchParams
- * @returns {{league: number, season?: number, baseline: string, movement: boolean, shrinkageMinutes?: number, windowGames?: number}}
+ * @returns {{league: number, season?: number, baseline: string, movement: boolean, shrinkageMinutes?: number, windowGames?: number, status: string}}
  */
 export function parseRankQuery(searchParams) {
   rejectUnknownParams(searchParams, KNOWN_RANK_PARAMS);
@@ -93,6 +101,7 @@ export function parseRankQuery(searchParams) {
     movement: parseMovementParam(searchParams.get('movement')),
     shrinkageMinutes: parseShrinkParam(searchParams.get('shrink')),
     windowGames: parseWindowParam(searchParams.get('window')),
+    status: parseStatusParam(searchParams.get('status')),
   };
 }
 
@@ -100,7 +109,7 @@ export function parseRankQuery(searchParams) {
  * Parses and validates query params for /api/export -- everything /api/rank accepts, plus
  * format and top.
  * @param {URLSearchParams} searchParams
- * @returns {{league: number, season?: number, baseline: string, movement: boolean, shrinkageMinutes?: number, windowGames?: number, format: string, top: number}}
+ * @returns {{league: number, season?: number, baseline: string, movement: boolean, shrinkageMinutes?: number, windowGames?: number, status: string, format: string, top: number}}
  */
 export function parseExportQuery(searchParams) {
   rejectUnknownParams(searchParams, KNOWN_EXPORT_PARAMS);
@@ -114,6 +123,7 @@ export function parseExportQuery(searchParams) {
     movement: parseMovementParam(searchParams.get('movement')),
     shrinkageMinutes: parseShrinkParam(searchParams.get('shrink')),
     windowGames: parseWindowParam(searchParams.get('window')),
+    status: parseStatusParam(searchParams.get('status')),
     format,
     top: parseTopParam(searchParams.get('top')),
   };
@@ -151,4 +161,4 @@ export function parseUpdateBody(body) {
   };
 }
 
-export { VALID_BASELINES, VALID_FORMATS };
+export { VALID_BASELINES, VALID_FORMATS, VALID_STATUSES };

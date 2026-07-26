@@ -7,11 +7,20 @@ const HEADER = ['Rank', 'RankDelta', 'Player', 'Pos', 'Team', 'GP', 'TOI', 'PIR'
 // Appended only in window mode (see hasWindowData below) -- the column COUNT is still fixed
 // within any one file, matching this module's existing "no ragged CSV" invariant.
 const WINDOW_HEADER_SUFFIX = ['SeasonGP', 'SeasonTOI', 'WindowToiPct'];
+// Appended only when the rows actually carry more than one distinct status (see
+// hasVariedStatus below) -- a leaderboard already filtered to one status would render the same
+// value in every row of this column, adding a fixed column for no information.
+const STATUS_HEADER_SUFFIX = ['Status'];
 
 // Window rows (see src/pir/window.js) are shape-compatible with season rows, so this is the
 // only way to tell the two apart -- mirrors table.js's own hasWindowData.
 function hasWindowData(rows) {
   return rows.some((row) => row.seasonGamesPlayed !== undefined);
+}
+
+// Mirrors table.js's own hasVariedStatus -- see that module for the full rationale.
+function hasVariedStatus(rows) {
+  return new Set(rows.map((row) => row.status)).size > 1;
 }
 
 // Per RFC 4180, a field only needs quoting if it contains a comma, a double quote, or a
@@ -35,7 +44,7 @@ function formatPirDelta(row) {
   return String(row.pirDelta);
 }
 
-function buildRow(row, rank, includeWindow) {
+function buildRow(row, rank, includeWindow, includeStatus) {
   const base = [
     rank,
     formatRankDelta(row),
@@ -55,15 +64,23 @@ function buildRow(row, rank, includeWindow) {
     row.appliedTPE,
   ];
 
-  if (!includeWindow) return base;
+  const withWindow = includeWindow
+    ? [...base, row.seasonGamesPlayed, row.seasonTimeOnIce, row.windowToiFraction * 100]
+    : base;
 
-  return [...base, row.seasonGamesPlayed, row.seasonTimeOnIce, row.windowToiFraction * 100];
+  // 'unknown' for a missing status, matching table.js -- see that module's identical fallback.
+  return includeStatus ? [...withWindow, row.status ?? 'unknown'] : withWindow;
 }
 
 export function toCsv(rankedRows, { top = Infinity } = {}) {
   const rows = rankedRows.slice(0, top);
   const includeWindow = hasWindowData(rows);
-  const header = includeWindow ? [...HEADER, ...WINDOW_HEADER_SUFFIX] : HEADER;
-  const records = [header, ...rows.map((row, index) => buildRow(row, index + 1, includeWindow))];
+  const includeStatus = hasVariedStatus(rows);
+  const header = [
+    ...HEADER,
+    ...(includeWindow ? WINDOW_HEADER_SUFFIX : []),
+    ...(includeStatus ? STATUS_HEADER_SUFFIX : []),
+  ];
+  const records = [header, ...rows.map((row, index) => buildRow(row, index + 1, includeWindow, includeStatus))];
   return records.map((fields) => fields.map(escapeCsvField).join(',')).join('\n');
 }

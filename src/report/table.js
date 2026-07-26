@@ -22,6 +22,15 @@ function hasWindowData(rows) {
   return rows.some((row) => row.seasonGamesPlayed !== undefined);
 }
 
+// A Status column is only worth a reader's attention when it actually varies -- a leaderboard
+// already filtered down to one status (--status=active/inactive) would show the same word on
+// every row, which is clutter, not information. Sniffed from the data (like hasWindowData
+// above) rather than passed in as a flag, so this can never drift out of sync with what a
+// --status filter actually did upstream.
+function hasVariedStatus(rows) {
+  return new Set(rows.map((row) => row.status)).size > 1;
+}
+
 function formatTimeOnIce(totalSeconds) {
   const seconds = Math.round(totalSeconds);
   const minutes = Math.floor(seconds / 60);
@@ -49,7 +58,7 @@ function formatPirDelta(row) {
 // Rank is derived from array position rather than read off the row: the caller hands us rows
 // in final ranked order, so re-deriving it here means this module never has to trust (or
 // re-validate) a rank field that could drift out of sync with the actual array order.
-function buildColumns(includeMovement, includeWindow) {
+function buildColumns(includeMovement, includeWindow, includeStatus) {
   const columns = [{ label: 'Rank', align: 'right', getValue: (_row, rank) => String(rank) }];
 
   if (includeMovement) {
@@ -60,6 +69,17 @@ function buildColumns(includeMovement, includeWindow) {
     { label: 'Player', align: 'left', getValue: (row) => row.name },
     { label: 'Pos', align: 'left', getValue: (row) => row.position },
     { label: 'Team', align: 'left', getValue: (row) => row.team },
+  );
+
+  if (includeStatus) {
+    // A row from a capture predating this feature (or one the Portal join couldn't resolve)
+    // has no status at all -- rendered as 'unknown' rather than a blank cell, matching how
+    // filterByPlayerStatus in src/commands.js already treats a missing status as not-provably-
+    // active for filtering purposes.
+    columns.push({ label: 'Status', align: 'left', getValue: (row) => row.status ?? 'unknown' });
+  }
+
+  columns.push(
     // In window mode, GP/TOI on the row ARE the window-scoped values (see src/pir/window.js) --
     // labelling them explicitly so a window leaderboard is never visually indistinguishable
     // from a season one.
@@ -94,7 +114,8 @@ export function formatTable(rankedRows, { top = Infinity, header = null } = {}) 
   const rows = rankedRows.slice(0, top);
   const includeMovement = hasMovementData(rows);
   const includeWindow = hasWindowData(rows);
-  const columns = buildColumns(includeMovement, includeWindow);
+  const includeStatus = hasVariedStatus(rows);
+  const columns = buildColumns(includeMovement, includeWindow, includeStatus);
 
   const cellsByRow = rows.map((row, index) =>
     columns.map((column) => column.getValue(row, index + 1))

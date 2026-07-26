@@ -8,14 +8,17 @@ const SEASON = 89;
 
 // Builds a fake deps object for captureSnapshot with no real I/O, tracking
 // calls so tests can assert on "was the network touched at all" without a
-// mocking library.
+// mocking library. portalPlayers defaults to empty -- no Portal row ever matches any fixture
+// player's name, so every captured row's status resolves to 'unknown' (see src/playerStatus.js)
+// unless a test opts into real Portal rows via the override.
 function makeFakeDeps({
   statsRows = [makePlayerStatsRow()],
   ratingsRows = [makePlayerRatingsRow()],
+  portalPlayers = [],
   existingSnapshot = null,
   seasonFinished = false,
 } = {}) {
-  const calls = { fetchPlayerStats: 0, fetchPlayerRatings: 0, writeCapture: [] };
+  const calls = { fetchPlayerStats: 0, fetchPlayerRatings: 0, fetchPortalPlayersByLeague: 0, writeCapture: [] };
 
   const deps = {
     fetchPlayerStats: async () => {
@@ -25,6 +28,10 @@ function makeFakeDeps({
     fetchPlayerRatings: async () => {
       calls.fetchPlayerRatings += 1;
       return ratingsRows;
+    },
+    fetchPortalPlayersByLeague: async () => {
+      calls.fetchPortalPlayersByLeague += 1;
+      return { rows: portalPlayers, truncated: false };
     },
     readLatest: async () => existingSnapshot,
     writeCapture: async (args) => {
@@ -104,7 +111,9 @@ test('captureSnapshot calls writeCapture exactly once with the trimmed snapshot'
 
   assert.strictEqual(calls.writeCapture.length, 1);
   assert.deepStrictEqual(calls.writeCapture[0], { league: LEAGUE, season: SEASON, snapshot });
-  assert.deepStrictEqual(snapshot.players[0], makeTrimmedPlayerRow());
+  // status: 'unknown' -- makeFakeDeps' default empty portalPlayers means no Portal row ever
+  // matches this fixture's name, so the join in src/playerStatus.js falls back to unknown.
+  assert.deepStrictEqual(snapshot.players[0], { ...makeTrimmedPlayerRow(), status: 'unknown' });
 });
 
 test('captureSnapshot skips entirely (no network calls) when the season is finished and already captured', async () => {
@@ -147,7 +156,9 @@ test('captureSnapshot does not skip when no season is given, even if isSeasonFin
 // zero-game-span candidate anchor a window request could pick.
 
 test('captureSnapshot skips writing (but never skips the network call) when the new capture is identical to the existing one', async () => {
-  const existingSnapshot = makeSnapshot(); // players: [makeTrimmedPlayerRow()] -- matches the default fetch below exactly
+  // status: 'unknown' on the existing row too -- it must match what a fresh capture will
+  // compute (makeFakeDeps' default empty portalPlayers) for the fingerprints to agree at all.
+  const existingSnapshot = makeSnapshot({ players: [{ ...makeTrimmedPlayerRow(), status: 'unknown' }] });
   const { deps, calls } = makeFakeDeps({ existingSnapshot });
 
   const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
@@ -176,7 +187,12 @@ test('captureSnapshot treats reordered-but-otherwise-identical player rows as un
   const ratingsRows = [makePlayerRatingsRow({ id: 1 }), makePlayerRatingsRow({ id: 2 })];
   const existingSnapshot = makeSnapshot({
     // Same two players as the fetch will produce, but REVERSED -- order must not matter.
-    players: [trimPlayerRow(makePlayerStatsRow({ id: 2 }), 350), trimPlayerRow(makePlayerStatsRow({ id: 1 }), 350)],
+    // status: 'unknown' on both -- must match what a fresh capture computes (makeFakeDeps'
+    // default empty portalPlayers) for the fingerprints to agree.
+    players: [
+      { ...trimPlayerRow(makePlayerStatsRow({ id: 2 }), 350), status: 'unknown' },
+      { ...trimPlayerRow(makePlayerStatsRow({ id: 1 }), 350), status: 'unknown' },
+    ],
   });
   const { deps, calls } = makeFakeDeps({ statsRows, ratingsRows, existingSnapshot });
 
@@ -240,6 +256,112 @@ test('captureSnapshot throws when player rows disagree on season with each other
     () => captureSnapshot({ league: LEAGUE }, deps, '/fake/dir'),
     /player rows disagree on season/,
   );
+});
+
+// --- Portal status join ------------------------------------------------------
+// status (see src/playerStatus.js) is joined onto every player row at capture time by exact
+// name match against a fresh Portal fetch -- these tests cover the wiring in captureSnapshot
+// itself; the join algorithm's own edge cases (no match, ambiguous match) are covered in
+// isolation in test/playerStatus.test.js.
+
+test('captureSnapshot attaches the Portal status to a persisted player row on an exact name match', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1, name: 'Winston Coles' })];
+  const portalPlayers = [{ pid: 2471, name: 'Winston Coles', status: 'active' }];
+  const { deps } = makeFakeDeps({ statsRows, portalPlayers });
+
+  const { snapshot } = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(snapshot.players[0].status, 'active');
+});
+
+test('captureSnapshot falls back to unknown for a player whose name matches no Portal row', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1, name: 'Nobody Here' })];
+  const portalPlayers = [{ pid: 1, name: 'Someone Else', status: 'active' }];
+  const { deps } = makeFakeDeps({ statsRows, portalPlayers });
+
+  const { snapshot } = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(snapshot.players[0].status, 'unknown');
+});
+
+test('captureSnapshot falls back every player to unknown when the Portal fetch throws', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1 }), makePlayerStatsRow({ id: 2 })];
+  const { deps } = makeFakeDeps({ statsRows });
+  deps.fetchPortalPlayersByLeague = async () => {
+    throw new Error('Portal API request failed: 500 Internal Server Error');
+  };
+
+  const { snapshot, warning } = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.ok(snapshot.players.every((player) => player.status === 'unknown'));
+  assert.match(warning, /Portal status lookup failed/);
+  assert.match(warning, /Portal API request failed: 500/);
+});
+
+test('captureSnapshot does not crash the whole capture when the Portal fetch fails -- it still writes the snapshot', async () => {
+  const { deps, calls } = makeFakeDeps();
+  deps.fetchPortalPlayersByLeague = async () => {
+    throw new Error('network error');
+  };
+
+  const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(result.skipped, false);
+  assert.strictEqual(calls.writeCapture.length, 1);
+});
+
+test('captureSnapshot reports no warning at all when the Portal fetch succeeds', async () => {
+  const { deps } = makeFakeDeps({ portalPlayers: [] });
+
+  const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual('warning' in result, false);
+});
+
+// --- Portal league scope (IIHF, WJC) ------------------------------------------
+// Portal's own leagueID enum only cleanly covers SHL (0) and SMJHL (1) -- IIHF (2) needs an
+// accompanying teamID this tool doesn't supply, and WJC (3) has no Portal leagueID at all. See
+// README's "Player status filter" section and src/snapshot.js's PORTAL_LEAGUE_ID_BY_LEAGUE.
+
+test('captureSnapshot skips the Portal fetch entirely for IIHF (league 2), falling every status back to unknown', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1, league: 2 })];
+  const { deps, calls } = makeFakeDeps({ statsRows });
+
+  const { snapshot, warning } = await captureSnapshot({ league: 2, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(calls.fetchPortalPlayersByLeague, 0);
+  assert.strictEqual(snapshot.players[0].status, 'unknown');
+  assert.match(warning, /league 2 isn't in Portal's supported scope/);
+  assert.match(warning, /teamID/);
+});
+
+test('captureSnapshot skips the Portal fetch entirely for WJC (league 3), falling every status back to unknown', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1, league: 3 })];
+  const { deps, calls } = makeFakeDeps({ statsRows });
+
+  const { snapshot, warning } = await captureSnapshot({ league: 3, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(calls.fetchPortalPlayersByLeague, 0);
+  assert.strictEqual(snapshot.players[0].status, 'unknown');
+  assert.match(warning, /league 3 isn't in Portal's supported scope/);
+});
+
+test('captureSnapshot fetches Portal players for SHL (league 0) and SMJHL (league 1), both in scope', async () => {
+  const { calls: shlCalls } = await (async () => {
+    const statsRows = [makePlayerStatsRow({ id: 1, league: 0 })];
+    const { deps, calls } = makeFakeDeps({ statsRows });
+    await captureSnapshot({ league: 0, season: SEASON }, deps, '/fake/dir');
+    return { calls };
+  })();
+  const { calls: smjhlCalls } = await (async () => {
+    const statsRows = [makePlayerStatsRow({ id: 1, league: 1 })];
+    const { deps, calls } = makeFakeDeps({ statsRows });
+    await captureSnapshot({ league: 1, season: SEASON }, deps, '/fake/dir');
+    return { calls };
+  })();
+
+  assert.strictEqual(shlCalls.fetchPortalPlayersByLeague, 1);
+  assert.strictEqual(smjhlCalls.fetchPortalPlayersByLeague, 1);
 });
 
 test('captureSnapshot throws when the API returns zero rows and no --season was given to fall back on', async () => {

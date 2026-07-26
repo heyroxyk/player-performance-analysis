@@ -15,6 +15,7 @@ import {
   VALID_LEAGUES,
   VALID_BASELINES,
   VALID_FORMATS,
+  VALID_STATUSES,
   parseNonNegativeInteger,
 } from './src/commands.js';
 
@@ -74,6 +75,10 @@ export function parseArgs(argv) {
   // than to a fixed constant. Collapsing it to a literal here would silently disable that.
   let shrink;
   let windowGames;
+  // Permissive by default, matching every other filter-ish flag here (--baseline, --format):
+  // an omitted --status must never silently narrow a leaderboard the caller didn't ask to
+  // narrow.
+  let status = 'all';
 
   for (const arg of flagArgs) {
     if (arg === '--no-movement') {
@@ -110,6 +115,9 @@ export function parseArgs(argv) {
       case 'window':
         windowGames = parseIntegerFlag('window', value);
         break;
+      case 'status':
+        status = value;
+        break;
       default:
         throw usageError(`unrecognized flag "--${flag}"`);
     }
@@ -124,13 +132,16 @@ export function parseArgs(argv) {
   if (!VALID_FORMATS.has(format)) {
     throw usageError(`--format must be one of "table", "json", "csv", got "${format}"`);
   }
+  if (!VALID_STATUSES.has(status)) {
+    throw usageError(`--status must be one of "active", "inactive", "all", got "${status}"`);
+  }
   // parseNonNegativeInteger accepts 0, but a zero-game window is meaningless -- reject it here
   // rather than let it reach findAnchorCapture, where it would read as "no window at all".
   if (windowGames !== undefined && windowGames < 1) {
     throw usageError('--window must be at least 1 game');
   }
 
-  return { command, league, season, baseline, movement, top, format, out, shrinkageMinutes: shrink, windowGames };
+  return { command, league, season, baseline, movement, top, format, out, shrinkageMinutes: shrink, windowGames, status };
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +150,13 @@ export function parseArgs(argv) {
 
 async function runUpdate(args, deps) {
   const result = await captureUpdate(args, deps);
+
+  // A soft, non-fatal Portal status-lookup failure (see snapshot.js's captureSnapshot) --
+  // printed regardless of skipped/captured outcome below, since either way every player's
+  // status silently fell back to 'unknown' for this capture.
+  if (result.warning) {
+    console.error(result.warning);
+  }
 
   if (result.skipped) {
     if (result.reason === 'unchanged') {

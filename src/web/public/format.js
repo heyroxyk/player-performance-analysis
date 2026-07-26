@@ -27,6 +27,19 @@ export function formatPirDelta(row) {
   return `${sign}${row.pirDelta.toFixed(2)}`;
 }
 
+/**
+ * True when `rows` contains more than one distinct player status -- mirrors
+ * src/report/table.js's own hasVariedStatus (and its rationale): a leaderboard already filtered
+ * down to one status via --status=active/inactive would show the same word in every row, which
+ * is clutter, not information, so the Status column only earns its place on screen when it
+ * actually varies.
+ * @param {Array<{status?: string}>} rows
+ * @returns {boolean}
+ */
+export function hasVariedStatus(rows) {
+  return new Set(rows.map((row) => row.status)).size > 1;
+}
+
 const POSITION_GROUP_MEMBERS = { F: ['C', 'LW', 'RW'], D: ['LD', 'RD'] };
 
 /**

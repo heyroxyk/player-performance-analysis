@@ -21,6 +21,7 @@ export { DEFAULT_SHRINKAGE_MINUTES };
 export const VALID_LEAGUES = new Set([0, 1, 2, 3]);
 export const VALID_BASELINES = new Set(['league', 'position']);
 export const VALID_FORMATS = new Set(['table', 'json', 'csv']);
+export const VALID_STATUSES = new Set(['active', 'inactive', 'all']);
 
 // Matches a bare non-negative integer literal only -- no sign, no decimal point, no
 // leading/trailing junk. Number.parseInt alone is NOT safe for league/season/top: it silently
@@ -62,14 +63,14 @@ export function parseNonNegativeInteger(name, value) {
 }
 
 /**
- * Validates the shared update/rank option set (league, and when present: baseline, format),
- * throwing a descriptive error for the first invalid field. The single source of truth for
- * "is this a legal combination of options" for both the CLI's --flag parsing and the web
+ * Validates the shared update/rank option set (league, and when present: baseline, format,
+ * status), throwing a descriptive error for the first invalid field. The single source of truth
+ * for "is this a legal combination of options" for both the CLI's --flag parsing and the web
  * server's query-string parsing, so a value the CLI would reject can never reach the web layer
  * either.
- * @param {{league: number, baseline?: string, format?: string}} options
+ * @param {{league: number, baseline?: string, format?: string, status?: string}} options
  */
-export function validateOptions({ league, baseline, format }) {
+export function validateOptions({ league, baseline, format, status }) {
   if (!VALID_LEAGUES.has(league)) {
     throw new Error(`league must be one of ${[...VALID_LEAGUES].join(', ')}, got ${league}`);
   }
@@ -78,6 +79,9 @@ export function validateOptions({ league, baseline, format }) {
   }
   if (format !== undefined && !VALID_FORMATS.has(format)) {
     throw new Error(`format must be one of "table", "json", "csv", got "${format}"`);
+  }
+  if (status !== undefined && !VALID_STATUSES.has(status)) {
+    throw new Error(`status must be one of "active", "inactive", "all", got "${status}"`);
   }
 }
 
@@ -122,11 +126,12 @@ export function buildUpdateSuggestion({ league, season }) {
  * @returns {Promise<{
  *   skipped: boolean,
  *   reason?: 'season-finished' | 'unchanged',
+ *   warning?: string,
  *   league: number, season: number, playerCount: number, capturedAt: string,
  * }>}
  */
 export async function captureUpdate({ league, season }, deps) {
-  const { skipped, reason, snapshot } = await deps.captureSnapshot({ league, season });
+  const { skipped, reason, snapshot, warning } = await deps.captureSnapshot({ league, season });
 
   // snapshot.season is always a concrete, resolved number by the time captureSnapshot
   // returns -- resolution (from the API's own rows, or an explicit --season as a fallback) is
@@ -134,6 +139,10 @@ export async function captureUpdate({ league, season }, deps) {
   return {
     skipped,
     ...(reason !== undefined ? { reason } : {}),
+    // warning surfaces a soft, non-fatal Portal status-lookup failure (see snapshot.js's
+    // fetchPortalPlayersForLeague) -- present only when captureSnapshot actually reports one,
+    // matching how `reason` above is already conditionally included.
+    ...(warning !== undefined ? { warning } : {}),
     league,
     season: snapshot.season,
     playerCount: snapshot.players.length,
@@ -156,6 +165,40 @@ function scoreSnapshotPlayers(players, { groupBy, shrinkageMinutes, deps }) {
   const { usable, excluded } = deps.filterScoreableRows(players);
   const ranked = deps.rankByPir(deps.computePir(usable, { groupBy, shrinkageMinutes }));
   return { ranked, excluded };
+}
+
+// Player activity `status` (see src/playerStatus.js) is sourced from the Portal, a system
+// entirely separate from the Index API this pipeline otherwise scores -- it's joined onto every
+// player row at capture time (src/snapshot.js) rather than fetched live here, so `rank` never
+// needs its own Portal call. Filtering by it is therefore a plain in-memory step, applied
+// BEFORE scoreSnapshotPlayers so a status-filtered-out player never reaches population
+// statistics (mean/stdev/shrinkage) at all -- exactly like filterScoreableRows' own exclusions.
+//
+// "active" keeps only status === 'active'. "inactive" keeps everything else: retired, pending,
+// denied, AND 'unknown' (a player the Portal join in src/playerStatus.js couldn't resolve, for
+// lack of a match or because of an ambiguous multi-match) -- an unresolved status is treated as
+// not-provably-active, never silently folded into "active" by default. "all" (the default)
+// applies no filter at all.
+/**
+ * @param {Array<object>} players
+ * @param {'active' | 'inactive' | 'all'} status
+ * @returns {{usable: Array<object>, excluded: Array<{row: object, reason: string}>}}
+ */
+function filterByPlayerStatus(players, status) {
+  if (status === 'all') return { usable: players, excluded: [] };
+
+  const usable = [];
+  const excluded = [];
+  for (const row of players) {
+    const isActive = row.status === 'active';
+    const keep = status === 'active' ? isActive : !isActive;
+    if (keep) {
+      usable.push(row);
+    } else {
+      excluded.push({ row, reason: status === 'active' ? 'inactive status' : 'active status' });
+    }
+  }
+  return { usable, excluded };
 }
 
 // A fixed K makes PIR mean a different thing depending on how far into a season a capture
@@ -204,7 +247,7 @@ function throwWindowUnavailable({ league, season, windowGames, blockers }) {
  * built two different ways.
  * @param {{
  *   league: number, season?: number, baseline: string, movement: boolean,
- *   shrinkageMinutes?: number, windowGames?: number,
+ *   shrinkageMinutes?: number, windowGames?: number, status?: 'active' | 'inactive' | 'all',
  * }} args
  * @param {object} current - the current (latest) snapshot for this league+season
  * @param {typeof defaultDeps} deps
@@ -213,26 +256,33 @@ function throwWindowUnavailable({ league, season, windowGames, blockers }) {
  *   shrinkageMinutes: number, shrinkageMode: 'adaptive' | 'explicit', window: object | null,
  * }>}
  */
-export async function buildRanking({ league, season, baseline, movement, shrinkageMinutes, windowGames }, current, deps) {
+export async function buildRanking({ league, season, baseline, movement, shrinkageMinutes, windowGames, status = 'all' }, current, deps) {
   const groupBy = baseline === 'position' ? (row) => deps.POSITION_GROUPS[row.position] : null;
 
   if (windowGames === undefined) {
-    const resolved = resolveShrinkageMinutes(shrinkageMinutes, current.players, deps);
-    const { ranked, excluded } = scoreSnapshotPlayers(current.players, { groupBy, shrinkageMinutes: resolved.shrinkageMinutes, deps });
+    const { usable: statusFiltered, excluded: statusExcluded } = filterByPlayerStatus(current.players, status);
+    const resolved = resolveShrinkageMinutes(shrinkageMinutes, statusFiltered, deps);
+    const { ranked, excluded } = scoreSnapshotPlayers(statusFiltered, { groupBy, shrinkageMinutes: resolved.shrinkageMinutes, deps });
+    const allExcluded = [...statusExcluded, ...excluded];
 
-    if (!movement) return { ranked, excluded, ...resolved, window: null };
+    if (!movement) return { ranked, excluded: allExcluded, ...resolved, window: null };
 
     // current.season (not the caller's possibly-omitted `season`) so this always agrees with
     // the season readLatest actually resolved -- otherwise a capture landing for a different
     // season between the two reads could diff two different seasons against each other, which
     // is the exact class of bug the self-describing capture model exists to prevent.
     const previous = await deps.readPrevious({ league, season: current.season });
-    if (previous === null) return { ranked, excluded, ...resolved, window: null };
+    if (previous === null) return { ranked, excluded: allExcluded, ...resolved, window: null };
 
+    // The previous snapshot is filtered by the SAME status option before scoring, for the same
+    // reason groupBy/shrinkageMinutes are shared below: any divergence in which players feed
+    // the previous ranking's population would make pirDelta partly reflect a different roster
+    // being scored rather than the same player's own movement.
+    const { usable: previousStatusFiltered } = filterByPlayerStatus(previous.players, status);
     // Previous-snapshot exclusions are discarded: those players were already reported the last
     // time that snapshot was itself the latest one being ranked.
-    const { ranked: previousRanked } = scoreSnapshotPlayers(previous.players, { groupBy, shrinkageMinutes: resolved.shrinkageMinutes, deps });
-    return { ranked: deps.computeMovement(ranked, previousRanked), excluded, ...resolved, window: null };
+    const { ranked: previousRanked } = scoreSnapshotPlayers(previousStatusFiltered, { groupBy, shrinkageMinutes: resolved.shrinkageMinutes, deps });
+    return { ranked: deps.computeMovement(ranked, previousRanked), excluded: allExcluded, ...resolved, window: null };
   }
 
   const anchorResult = await deps.findAnchorCapture({ league, season: current.season, games: windowGames });
@@ -256,15 +306,18 @@ export async function buildRanking({ league, season, baseline, movement, shrinka
     throwWindowUnavailable({ league, season: current.season, windowGames, blockers: quality.blockers });
   }
 
-  const resolved = resolveShrinkageMinutes(shrinkageMinutes, rows, deps);
-  const { ranked, excluded: filterExcluded } = scoreSnapshotPlayers(rows, { groupBy, shrinkageMinutes: resolved.shrinkageMinutes, deps });
+  // Window rows (src/pir/window.js) carry `status` through from the current snapshot's rows,
+  // so status filtering works identically here as it does season-to-date.
+  const { usable: statusFilteredRows, excluded: statusExcluded } = filterByPlayerStatus(rows, status);
+  const resolved = resolveShrinkageMinutes(shrinkageMinutes, statusFilteredRows, deps);
+  const { ranked, excluded: filterExcluded } = scoreSnapshotPlayers(statusFilteredRows, { groupBy, shrinkageMinutes: resolved.shrinkageMinutes, deps });
 
   return {
     ranked,
     // dropped uses the identical {row, reason} shape filterScoreableRows' exclusions do, so
-    // both front ends render every excluded player -- window-dropped or filter-dropped -- with
-    // no new rendering code.
-    excluded: [...dropped, ...filterExcluded],
+    // both front ends render every excluded player -- window-dropped, status-filtered, or
+    // filter-dropped -- with no new rendering code.
+    excluded: [...dropped, ...statusExcluded, ...filterExcluded],
     ...resolved,
     window: {
       requestedGames: windowGames,
@@ -291,6 +344,12 @@ export function formatRanking(ranked, { format, top, meta }, deps) {
     header += ` / Window: last ~${meta.window.requestedGames} games (resolved ${meta.window.resolvedGames}, anchor ${meta.window.anchorCapturedAt})`;
   }
   header += ` / Shrinkage: ${Math.round(meta.shrinkageMinutes)} min (${meta.shrinkageMode})`;
+  // Only shown when a status filter is actually narrowing the leaderboard -- "all" (the
+  // default, no filtering at all) stays silent here, the same way Baseline/Window only earn a
+  // header segment when there's something non-trivial to say.
+  if (meta.status !== undefined && meta.status !== 'all') {
+    header += ` / Status: ${meta.status}`;
+  }
 
   return deps.formatTable(ranked, { top, header });
 }
@@ -307,13 +366,13 @@ export function formatRanking(ranked, { format, top, meta }, deps) {
  * season-to-date, which would answer a different question than the one asked with no warning.
  * @param {{
  *   league: number, season?: number, baseline: string, movement: boolean,
- *   shrinkageMinutes?: number, windowGames?: number,
+ *   shrinkageMinutes?: number, windowGames?: number, status?: 'active' | 'inactive' | 'all',
  * }} args
  * @param {typeof defaultDeps} deps
  * @returns {Promise<{ranked: Array<object>, meta: object, excluded: Array<object>}>}
  */
 export async function getRanking(args, deps) {
-  const { league, season, baseline } = args;
+  const { league, season, baseline, status = 'all' } = args;
 
   const current = await deps.readLatest({ league, season });
   if (current === null) {
@@ -328,7 +387,7 @@ export async function getRanking(args, deps) {
   const { ranked, excluded, shrinkageMinutes, shrinkageMode, window } = await buildRanking(args, current, deps);
   const meta = {
     league, season: current.season, baseline, capturedAt: current.capturedAt,
-    shrinkageMinutes, shrinkageMode, window,
+    shrinkageMinutes, shrinkageMode, window, status,
   };
 
   return { ranked, meta, excluded };

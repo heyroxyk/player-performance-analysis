@@ -92,6 +92,7 @@ test('parseArgs parses an update command with league and season', () => {
     // value. Collapsing it to a constant here would silently disable that.
     shrinkageMinutes: undefined,
     windowGames: undefined,
+    status: 'all',
   });
 });
 
@@ -119,10 +120,11 @@ test('parseArgs parses a rank command with every flag set', () => {
     out: 'rankings.json',
     shrinkageMinutes: 200,
     windowGames: 12,
+    status: 'all',
   });
 });
 
-test('parseArgs applies defaults for baseline, movement, top, format, out, shrink, and window when omitted', () => {
+test('parseArgs applies defaults for baseline, movement, top, format, out, shrink, window, and status when omitted', () => {
   const args = parseArgs(['rank', '--league=0']);
   assert.equal(args.baseline, 'league');
   assert.equal(args.movement, true);
@@ -132,6 +134,7 @@ test('parseArgs applies defaults for baseline, movement, top, format, out, shrin
   assert.equal(args.season, undefined);
   assert.equal(args.shrinkageMinutes, undefined);
   assert.equal(args.windowGames, undefined);
+  assert.equal(args.status, 'all');
 });
 
 test('parseArgs throws on a non-numeric --shrink instead of silently producing NaN', () => {
@@ -193,6 +196,16 @@ test('parseArgs throws on an invalid --baseline value', () => {
 
 test('parseArgs throws on an invalid --format value', () => {
   assert.throws(() => parseArgs(['rank', '--league=1', '--format=xml']), /--format/);
+});
+
+test('parseArgs throws on an invalid --status value, the same way an invalid --baseline already is', () => {
+  assert.throws(() => parseArgs(['rank', '--league=1', '--status=retired']), /--status must be one of "active", "inactive", "all"/);
+});
+
+test('parseArgs accepts each valid --status value', () => {
+  assert.equal(parseArgs(['rank', '--league=1', '--status=active']).status, 'active');
+  assert.equal(parseArgs(['rank', '--league=1', '--status=inactive']).status, 'inactive');
+  assert.equal(parseArgs(['rank', '--league=1', '--status=all']).status, 'all');
 });
 
 // --- integer flag validation -----------------------------------------------
@@ -270,6 +283,30 @@ test('main update reports "no new data" rather than "skipped" for an unchanged c
 
   assert.ok(logs.some((line) => line.includes('no new data')));
   assert.ok(!logs.some((line) => line.toLowerCase().includes('skipped')), 'must not say "skipped" -- the network call was NOT avoided, only the write was');
+});
+
+test('main update prints a Portal status-lookup warning to console.error when captureUpdate reports one', async () => {
+  const deps = makeFakeDeps({
+    captureSnapshot: trackCalls(async () => ({
+      skipped: false,
+      snapshot: makeSnapshot(),
+      warning: "Portal status lookup failed (network error) -- every player's status is 'unknown' for this capture.",
+    })),
+  });
+
+  const { errors } = await withCapturedConsole(() => main(['update', '--league=1', '--season=89'], deps));
+
+  assert.ok(errors.some((line) => line.includes('Portal status lookup failed')));
+});
+
+test('main update prints no warning line at all when captureUpdate reports none', async () => {
+  const deps = makeFakeDeps({
+    captureSnapshot: trackCalls(async () => ({ skipped: false, snapshot: makeSnapshot() })),
+  });
+
+  const { errors } = await withCapturedConsole(() => main(['update', '--league=1', '--season=89'], deps));
+
+  assert.equal(errors.length, 0);
 });
 
 // ---------------------------------------------------------------------------

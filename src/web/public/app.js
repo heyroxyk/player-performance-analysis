@@ -3,7 +3,7 @@
 // every non-trivial decision (validation, scoring, formatting) pushed to the server so this
 // file is mostly DOM wiring.
 
-import { formatTimeOnIce, formatRankMovement, formatPirDelta, filterRows, sortRows } from './format.js';
+import { formatTimeOnIce, formatRankMovement, formatPirDelta, filterRows, sortRows, hasVariedStatus } from './format.js';
 
 const LEAGUES_FALLBACK = [{ id: 0, name: 'SHL' }, { id: 1, name: 'SMJHL' }];
 const POSITION_FILTERS = ['ALL', 'F', 'D', 'C', 'LW', 'RW', 'LD', 'RD'];
@@ -11,17 +11,25 @@ const POSITION_FILTERS = ['ALL', 'F', 'D', 'C', 'LW', 'RW', 'LD', 'RD'];
 // Window mode swaps in a couple of columns (see src/report/table.js's identical
 // buildColumns(includeMovement, includeWindow) for the server-side analogue) -- GP/TOI are
 // labelled as window-scoped rather than season-scoped, and a Season GP column appears so a
-// window leaderboard is never visually mistakable for a season one.
-function buildColumns(isWindow) {
+// window leaderboard is never visually mistakable for a season one. Status (see
+// src/report/table.js's own hasVariedStatus) only appears when the current rows actually carry
+// more than one distinct status -- a leaderboard already filtered to one status would show the
+// same word on every row.
+function buildColumns(isWindow, isStatus) {
   const columns = [
     { key: 'rank', label: 'Rank', align: 'right', sortable: false },
     { key: 'mvmt', label: 'Mvmt', align: 'left', sortable: false },
     { key: 'name', label: 'Player', align: 'left', sortable: true },
     { key: 'position', label: 'Pos', align: 'left', sortable: true },
     { key: 'team', label: 'Team', align: 'left', sortable: true },
+  ];
+  if (isStatus) {
+    columns.push({ key: 'status', label: 'Status', align: 'left', sortable: true });
+  }
+  columns.push(
     { key: 'gamesPlayed', label: isWindow ? 'GP (win)' : 'GP', align: 'right', sortable: true },
     { key: 'timeOnIce', label: isWindow ? 'TOI (win)' : 'TOI', align: 'right', sortable: true },
-  ];
+  );
   if (isWindow) {
     columns.push({ key: 'seasonGamesPlayed', label: 'Season GP', align: 'right', sortable: true });
   }
@@ -39,6 +47,7 @@ const state = {
   league: 0,
   season: undefined,
   baseline: 'league',
+  status: 'all',
   movement: true,
   // null = adaptive (server-resolved, scaled to sample depth); a number = an explicit override.
   shrinkageMinutes: null,
@@ -99,6 +108,7 @@ const el = {
   newSeasonInput: document.getElementById('newSeasonInput'),
   newSeasonCapture: document.getElementById('newSeasonCapture'),
   baselineChips: document.getElementById('baselineChips'),
+  statusSelect: document.getElementById('statusSelect'),
   windowSelect: document.getElementById('windowSelect'),
   windowNote: document.getElementById('windowNote'),
   movementToggle: document.getElementById('movementToggle'),
@@ -265,6 +275,12 @@ async function runCapture(season) {
     el.captureStatus.textContent = result.skipped
       ? `Season ${result.season} is already finished and captured -- no network call made.`
       : `Captured ${result.playerCount} players for season ${result.season} in ${((result.durationMs ?? 0) / 1000).toFixed(1)}s.`;
+    // A soft, non-fatal Portal status-lookup failure (see snapshot.js's captureSnapshot) --
+    // every player's status silently fell back to 'unknown' for this capture, worth surfacing
+    // right next to the capture result rather than only in a server log.
+    if (result.warning) {
+      el.captureStatus.textContent += ` ${result.warning}`;
+    }
     state.season = result.season;
     await loadSnapshots();
     await loadRanking();
@@ -325,6 +341,7 @@ function buildRankParams() {
   const params = new URLSearchParams({
     league: String(state.league),
     baseline: state.baseline,
+    status: state.status,
     movement: String(state.movement),
   });
   if (state.season !== undefined) params.set('season', String(state.season));
@@ -548,6 +565,9 @@ function renderRow(row, columns) {
     name: row.name,
     position: row.position,
     team: row.team,
+    // 'unknown' for a missing status, matching src/report/table.js's identical fallback --
+    // either a capture predating this feature, or a Portal join that couldn't resolve a match.
+    status: row.status ?? 'unknown',
     gamesPlayed: String(row.gamesPlayed),
     timeOnIce: formatTimeOnIce(row.timeOnIce),
     seasonGamesPlayed: row.seasonGamesPlayed !== undefined ? String(row.seasonGamesPlayed) : '',
@@ -577,11 +597,11 @@ function renderRow(row, columns) {
 }
 
 function renderTable() {
-  const columns = buildColumns(Boolean(state.ranking?.meta?.window));
+  const allPlayers = state.ranking?.players ?? [];
+  const columns = buildColumns(Boolean(state.ranking?.meta?.window), hasVariedStatus(allPlayers));
   renderTableHead(columns);
   clearChildren(el.boardBody);
 
-  const allPlayers = state.ranking?.players ?? [];
   const filtered = filterRows(allPlayers, { query: state.filterQuery, position: state.filterPosition });
   const sorted = sortRows(filtered, { key: state.sortKey, direction: state.sortDirection });
   const limited = state.topLimit === 'all' ? sorted : sorted.slice(0, Number(state.topLimit));
@@ -633,7 +653,9 @@ function showEmptyState(kind) {
     el.emptyState.appendChild(textEl('p', null, 'No snapshot captured yet for this league/season.'));
     el.emptyState.appendChild(textEl('code', 'empty-state-cmd', suggestion));
   } else {
-    el.emptyState.appendChild(textEl('p', null, 'Every skater in this snapshot was excluded from scoring (no ice time or no games played).'));
+    // No longer just "no ice time or no games played" -- a --status filter (see the excluded
+    // banner above for the per-player breakdown) can just as easily be why nobody's left.
+    el.emptyState.appendChild(textEl('p', null, 'Every skater in this snapshot was excluded from scoring or filtered out (see above).'));
   }
 }
 
@@ -696,6 +718,11 @@ function wireEvents() {
     state.season = Number(el.seasonSelect.value);
     updateWindowAvailability();
     updateMovementAvailability();
+    loadRanking();
+  });
+
+  el.statusSelect.addEventListener('change', () => {
+    state.status = el.statusSelect.value;
     loadRanking();
   });
 
