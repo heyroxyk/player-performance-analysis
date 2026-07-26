@@ -246,6 +246,14 @@ function renderBaselineChips() {
   ];
   renderChips(el.baselineChips, options, state.baseline, (value) => {
     state.baseline = value;
+    // renderChips rebuilds the chip buttons (and their aria-checked, which drives the
+    // .chip[aria-checked="true"] highlight in styles.css) from whatever activeValue was passed
+    // in AT CALL TIME -- re-calling this function is what makes the highlight track the new
+    // selection. Without it (the bug renderLeagueChips avoids by being re-invoked from
+    // refreshSnapshotsAndRanking on every league switch), the pressed-looking chip freezes on
+    // whichever one was active when this ran, even though the underlying state -- and the
+    // ranking it drives -- has since moved on correctly.
+    renderBaselineChips();
     loadRanking();
   });
 }
@@ -254,6 +262,7 @@ function renderPositionChips() {
   const options = POSITION_FILTERS.map((value) => ({ value, label: value }));
   renderChips(el.positionChips, options, state.filterPosition, (value) => {
     state.filterPosition = value;
+    renderPositionChips(); // see renderBaselineChips' comment on the same pattern
     renderTable();
   });
 }
