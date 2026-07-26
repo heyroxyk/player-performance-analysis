@@ -4,6 +4,7 @@ import {
   formatTimeOnIce,
   formatRankMovement,
   formatPirDelta,
+  hasVariedStatus,
   matchesPositionFilter,
   filterRows,
   sortRows,
@@ -36,6 +37,22 @@ test('matchesPositionFilter matches ALL, an exact position, and a broad F/D grou
   assert.equal(matchesPositionFilter('LD', 'D'), true);
   assert.equal(matchesPositionFilter('C', 'D'), false);
   assert.equal(matchesPositionFilter('C', 'F'), true);
+});
+
+test('hasVariedStatus is true when rows carry more than one distinct status', () => {
+  assert.equal(hasVariedStatus([{ status: 'active' }, { status: 'retired' }]), true);
+});
+
+test('hasVariedStatus is false when every row shares the same status', () => {
+  assert.equal(hasVariedStatus([{ status: 'active' }, { status: 'active' }]), false);
+});
+
+test('hasVariedStatus is false when no row carries a status field at all', () => {
+  assert.equal(hasVariedStatus([{ name: 'Alice' }, { name: 'Bob' }]), false);
+});
+
+test('hasVariedStatus is false for a single row, regardless of status', () => {
+  assert.equal(hasVariedStatus([{ status: 'active' }]), false);
 });
 
 function makeRow(overrides = {}) {

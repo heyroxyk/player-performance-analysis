@@ -58,6 +58,16 @@ test('validateOptions rejects an invalid format when present', () => {
   assert.throws(() => validateOptions({ league: 1, format: 'xml' }), /format must be one of "table", "json", "csv"/);
 });
 
+test('validateOptions accepts each valid status value', () => {
+  assert.doesNotThrow(() => validateOptions({ league: 1, status: 'active' }));
+  assert.doesNotThrow(() => validateOptions({ league: 1, status: 'inactive' }));
+  assert.doesNotThrow(() => validateOptions({ league: 1, status: 'all' }));
+});
+
+test('validateOptions rejects an invalid status when present, the same way an invalid baseline already is', () => {
+  assert.throws(() => validateOptions({ league: 1, status: 'retired' }), /status must be one of "active", "inactive", "all"/);
+});
+
 // ---------------------------------------------------------------------------
 // buildUpdateSuggestion
 // ---------------------------------------------------------------------------
@@ -166,7 +176,7 @@ test('getRanking returns ranked rows, meta (with the resolved season, resolved s
 
   assert.deepEqual(result.meta, {
     league: LEAGUE, season: SEASON, baseline: 'league', capturedAt: '2026-07-20T12:00:00.000Z',
-    shrinkageMinutes: 400, shrinkageMode: 'adaptive', window: null,
+    shrinkageMinutes: 400, shrinkageMode: 'adaptive', window: null, status: 'all',
   });
   assert.equal(result.excluded.length, 1);
 });
@@ -222,6 +232,116 @@ test('getRanking resolves ONE adaptive shrinkageMinutes and reuses it for both t
   const shrinkageValuesUsed = deps.computePir.calls.map(([, options]) => options.shrinkageMinutes);
   assert.deepEqual(shrinkageValuesUsed, [111, 111], 'both computePir calls must share the SAME resolved shrinkage');
   assert.equal(deps.adaptiveShrinkageMinutes.calls.length, 1, 'adaptive resolution must run once, not once per snapshot');
+});
+
+// ---------------------------------------------------------------------------
+// getRanking -- status filter
+// ---------------------------------------------------------------------------
+// filterByPlayerStatus (an internal helper in src/commands.js, not exported) is exercised here
+// through getRanking/buildRanking rather than in isolation.
+
+test('getRanking with status: "active" keeps only active players, excluding everyone else with reason "inactive status"', async () => {
+  const players = [
+    { id: 1, name: 'Active Player', status: 'active' },
+    { id: 2, name: 'Retired Player', status: 'retired' },
+    { id: 3, name: 'Unresolved Player', status: 'unknown' },
+  ];
+  const deps = makeRankingDeps({ readLatest: trackCalls(async () => makeSnapshot({ players })) });
+
+  const result = await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: false, status: 'active' }, deps);
+
+  assert.deepEqual(result.ranked.map((row) => row.id), [1]);
+  assert.deepEqual(
+    result.excluded.map((entry) => ({ id: entry.row.id, reason: entry.reason })),
+    [{ id: 2, reason: 'inactive status' }, { id: 3, reason: 'inactive status' }],
+  );
+});
+
+test('getRanking with status: "inactive" keeps retired/pending/denied/unknown, excluding only active players with reason "active status"', async () => {
+  const players = [
+    { id: 1, name: 'Active Player', status: 'active' },
+    { id: 2, name: 'Retired Player', status: 'retired' },
+    { id: 3, name: 'Unresolved Player', status: 'unknown' },
+  ];
+  const deps = makeRankingDeps({ readLatest: trackCalls(async () => makeSnapshot({ players })) });
+
+  const result = await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: false, status: 'inactive' }, deps);
+
+  assert.deepEqual(result.ranked.map((row) => row.id).sort(), [2, 3]);
+  assert.deepEqual(result.excluded, [{ row: players[0], reason: 'active status' }]);
+});
+
+test('getRanking with status: "all" (the default) applies no status filter at all', async () => {
+  const players = [
+    { id: 1, name: 'Active Player', status: 'active' },
+    { id: 2, name: 'Retired Player', status: 'retired' },
+  ];
+  const deps = makeRankingDeps({ readLatest: trackCalls(async () => makeSnapshot({ players })) });
+
+  const result = await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: false }, deps);
+
+  assert.deepEqual(result.ranked.map((row) => row.id).sort(), [1, 2]);
+  assert.equal(result.excluded.length, 0);
+  assert.equal(result.meta.status, 'all');
+});
+
+test('getRanking reflects the requested status filter in meta.status', async () => {
+  const deps = makeRankingDeps();
+
+  const result = await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: false, status: 'active' }, deps);
+
+  assert.equal(result.meta.status, 'active');
+});
+
+test('getRanking concatenates status-filtered exclusions ahead of filterScoreableRows exclusions', async () => {
+  const players = [
+    { id: 1, name: 'Active Player', status: 'active' },
+    { id: 2, name: 'Retired Player', status: 'retired' },
+  ];
+  const deps = makeRankingDeps({
+    readLatest: trackCalls(async () => makeSnapshot({ players })),
+    filterScoreableRows: trackCalls((rows) => ({ usable: rows, excluded: [{ row: { name: 'Bench' }, reason: 'no ice time' }] })),
+  });
+
+  const result = await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: false, status: 'active' }, deps);
+
+  assert.deepEqual(result.excluded.map((entry) => entry.reason), ['inactive status', 'no ice time']);
+});
+
+test('getRanking never passes a status-filtered-out player into computePir, keeping them out of population statistics', async () => {
+  const players = [
+    { id: 1, name: 'Active Player', status: 'active' },
+    { id: 2, name: 'Retired Player', status: 'retired' },
+  ];
+  const deps = makeRankingDeps({ readLatest: trackCalls(async () => makeSnapshot({ players })) });
+
+  await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: false, status: 'active' }, deps);
+
+  const [rowsPassed] = deps.computePir.calls[0];
+  assert.deepEqual(rowsPassed.map((row) => row.id), [1]);
+});
+
+test('getRanking filters the PREVIOUS snapshot by the same status before computing movement', async () => {
+  const currentPlayers = [
+    { id: 1, name: 'Active Current', status: 'active' },
+    { id: 2, name: 'Retired Current', status: 'retired' },
+  ];
+  const previousPlayers = [
+    { id: 1, name: 'Active Current', status: 'active' },
+    { id: 3, name: 'Retired Previous', status: 'retired' },
+  ];
+  const deps = makeRankingDeps({
+    readLatest: trackCalls(async () => makeSnapshot({ players: currentPlayers })),
+    readPrevious: trackCalls(async () => makeSnapshot({ players: previousPlayers })),
+  });
+
+  await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: true, status: 'active' }, deps);
+
+  // computePir runs once for the current usable rows and once for the previous usable rows --
+  // both calls must reflect the SAME status filter, or pirDelta would partly measure a
+  // different roster being scored rather than the same player's own movement.
+  const idsPerCall = deps.computePir.calls.map(([rows]) => rows.map((row) => row.id));
+  assert.deepEqual(idsPerCall, [[1], [1]]);
 });
 
 // ---------------------------------------------------------------------------
@@ -283,6 +403,34 @@ test('getRanking concatenates window-dropped players into excluded, alongside fi
   // computePir must receive the WINDOW rows, not current.players.
   const [rowsPassed] = deps.computePir.calls[0];
   assert.deepEqual(rowsPassed, windowRows);
+});
+
+test('getRanking window mode filters window rows by status, concatenating dropped, status-filtered, then filter-dropped exclusions', async () => {
+  // Window rows (src/pir/window.js's buildWindowRows) carry `status` through from the current
+  // snapshot's rows, so status filtering must apply identically here as it does season-to-date.
+  const windowRows = [
+    { id: 1, name: 'Active Window', status: 'active', timeOnIce: 1000, gamesPlayed: 5 },
+    { id: 2, name: 'Retired Window', status: 'retired', timeOnIce: 1000, gamesPlayed: 5 },
+  ];
+  const deps = makeRankingDeps({
+    findAnchorCapture: trackCalls(async () => ({ anchor: makeSnapshot(), reason: null, resolvedGames: 12 })),
+    buildWindowRows: trackCalls(() => ({
+      rows: windowRows,
+      dropped: [{ row: { name: 'Corrected' }, reason: 'stats were corrected downward since the anchor capture' }],
+      summary: {
+        medianToiFraction: 0.4, playerCount: 2, droppedCount: 1, callUpCount: 0,
+        anchorCapturedAt: '2026-07-01T12:00:00.000Z', medianWindowGamesPlayed: 5, medianWindowTimeOnIce: 1000, tradedCount: 0,
+      },
+    })),
+    evaluateWindowQuality: trackCalls(() => ({ blockers: [], warnings: [] })),
+    filterScoreableRows: trackCalls((rows) => ({ usable: rows, excluded: [{ row: { name: 'NoIceTime' }, reason: 'no ice time' }] })),
+  });
+
+  const result = await getRanking({ league: LEAGUE, season: SEASON, baseline: 'league', movement: true, windowGames: 12, status: 'active' }, deps);
+
+  assert.deepEqual(result.excluded.map((entry) => entry.row.name), ['Corrected', 'Retired Window', 'NoIceTime']);
+  const [rowsPassed] = deps.computePir.calls[0];
+  assert.deepEqual(rowsPassed.map((row) => row.id), [1]);
 });
 
 test('getRanking forces movement off in window mode, with a stated reason, even when movement: true was requested', async () => {
@@ -391,4 +539,43 @@ test('formatRanking appends a Window segment to the header when meta.window is p
     'League 1 / Season 89 / Baseline: league / Captured: 2026-07-20T12:00:00.000Z / ' +
     'Window: last ~12 games (resolved 11, anchor 2026-07-01T12:00:00.000Z) / Shrinkage: 42 min (explicit)',
   );
+});
+
+test('formatRanking appends a Status segment to the header when meta.status is set and narrows the leaderboard', () => {
+  const deps = makeFormatDeps();
+  const meta = {
+    league: 1, season: 89, baseline: 'league', capturedAt: '2026-07-20T12:00:00.000Z',
+    shrinkageMinutes: 105, shrinkageMode: 'adaptive', window: null, status: 'active',
+  };
+
+  formatRanking([], { format: 'table', top: Infinity, meta }, deps);
+
+  const [, options] = deps.formatTable.calls[0];
+  assert.ok(options.header.endsWith('/ Status: active'), `expected a Status segment in: ${options.header}`);
+});
+
+test('formatRanking omits the Status segment when meta.status is "all" (the default, no filtering)', () => {
+  const deps = makeFormatDeps();
+  const meta = {
+    league: 1, season: 89, baseline: 'league', capturedAt: '2026-07-20T12:00:00.000Z',
+    shrinkageMinutes: 105, shrinkageMode: 'adaptive', window: null, status: 'all',
+  };
+
+  formatRanking([], { format: 'table', top: Infinity, meta }, deps);
+
+  const [, options] = deps.formatTable.calls[0];
+  assert.ok(!options.header.includes('Status'), `expected no Status segment in: ${options.header}`);
+});
+
+test('formatRanking omits the Status segment when meta.status is undefined, matching a pre-feature caller', () => {
+  const deps = makeFormatDeps();
+  const meta = {
+    league: 1, season: 89, baseline: 'league', capturedAt: '2026-07-20T12:00:00.000Z',
+    shrinkageMinutes: 105, shrinkageMode: 'adaptive', window: null,
+  };
+
+  formatRanking([], { format: 'table', top: Infinity, meta }, deps);
+
+  const [, options] = deps.formatTable.calls[0];
+  assert.ok(!options.header.includes('Status'), `expected no Status segment in: ${options.header}`);
 });

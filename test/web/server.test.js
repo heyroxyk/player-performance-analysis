@@ -187,6 +187,53 @@ test('GET /api/rank rejects an invalid baseline', async () => {
   });
 });
 
+test('GET /api/rank rejects an invalid status value the same way an invalid baseline already is', async () => {
+  await withServer(undefined, async ({ baseUrl }) => {
+    const res = await fetch(baseUrl + '/api/rank?league=1&status=retired');
+    assert.equal(res.status, 400);
+  });
+});
+
+test('GET /api/rank defaults status to "all" when the param is omitted', async () => {
+  await withServer(undefined, async ({ baseUrl }) => {
+    const res = await fetch(baseUrl + '/api/rank?league=1');
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.meta.status, 'all');
+  });
+});
+
+test('GET /api/rank?status=active accepts the param and reflects it in meta', async () => {
+  await withServer(undefined, async ({ baseUrl }) => {
+    const res = await fetch(baseUrl + '/api/rank?league=1&status=active');
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.meta.status, 'active');
+  });
+});
+
+test('GET /api/rank?status=active excludes an inactive player with a reason, matching the CLI\'s filtering behavior', async () => {
+  await withServer(
+    {
+      commands: {
+        readLatest: trackCalls(async () => makeSnapshot({
+          players: [
+            { id: 1, name: 'Active Player', status: 'active' },
+            { id: 2, name: 'Retired Player', status: 'retired' },
+          ],
+        })),
+      },
+    },
+    async ({ baseUrl }) => {
+      const res = await fetch(baseUrl + '/api/rank?league=1&status=active&movement=false');
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.deepEqual(body.players.map((row) => row.id), [1]);
+      assert.deepEqual(body.excluded.map((entry) => entry.reason), ['inactive status']);
+    },
+  );
+});
+
 // ---------------------------------------------------------------------------
 // GET /api/rank -- behavior
 // ---------------------------------------------------------------------------
@@ -334,6 +381,20 @@ test('GET /api/export defaults to the table format, matching the CLI default', a
 test('GET /api/export rejects an invalid format', async () => {
   await withServer(undefined, async ({ baseUrl }) => {
     const res = await fetch(baseUrl + '/api/export?league=1&format=xml');
+    assert.equal(res.status, 400);
+  });
+});
+
+test('GET /api/export?status=active is accepted (status inherits from the shared KNOWN_RANK_PARAMS set)', async () => {
+  await withServer(undefined, async ({ baseUrl }) => {
+    const res = await fetch(baseUrl + '/api/export?league=1&status=active&format=json');
+    assert.equal(res.status, 200);
+  });
+});
+
+test('GET /api/export rejects an invalid status value', async () => {
+  await withServer(undefined, async ({ baseUrl }) => {
+    const res = await fetch(baseUrl + '/api/export?league=1&status=retired');
     assert.equal(res.status, 400);
   });
 });

@@ -114,3 +114,46 @@ test('formatTable never labels GP/TOI as window-scoped when no row carries windo
   assert.ok(!headerLine.includes('(win)'));
   assert.ok(!headerLine.includes('Season GP'));
 });
+
+// ---------------------------------------------------------------------------
+// Status column
+// ---------------------------------------------------------------------------
+// A Status column only earns its place when the leaderboard's rows actually carry more than one
+// distinct status -- see hasVariedStatus's own rationale in src/report/table.js.
+
+test('formatTable adds a Status column when rows carry more than one distinct status', () => {
+  const rows = [makeRow({ name: 'Active', status: 'active' }), makeRow({ name: 'Retired', status: 'retired' })];
+
+  const output = formatTable(rows);
+  const headerLine = output.split('\n')[0];
+
+  assert.ok(headerLine.includes('Status'));
+  const tokens = output.split(/\s+/).filter(Boolean);
+  assert.ok(tokens.includes('active'));
+  assert.ok(tokens.includes('retired'));
+});
+
+test('formatTable omits the Status column entirely when every row shares the same status', () => {
+  const rows = [makeRow({ name: 'Alice', status: 'active' }), makeRow({ name: 'Bob', status: 'active' })];
+
+  const output = formatTable(rows);
+  const headerLine = output.split('\n')[0];
+
+  assert.ok(!headerLine.includes('Status'), 'a uniform status column would just repeat the same word on every row');
+});
+
+test('formatTable omits the Status column when no row carries a status field at all (a pre-feature capture)', () => {
+  const output = formatTable([makeRow(), makeRow({ name: 'Bob' })]);
+  const headerLine = output.split('\n')[0];
+
+  assert.ok(!headerLine.includes('Status'));
+});
+
+test('formatTable renders a missing status as "unknown", not a blank cell, once the column is shown', () => {
+  const rows = [makeRow({ name: 'Has Status', status: 'active' }), makeRow({ name: 'No Status' })];
+
+  const output = formatTable(rows);
+  const tokens = output.split(/\s+/).filter(Boolean);
+
+  assert.ok(tokens.includes('unknown'));
+});

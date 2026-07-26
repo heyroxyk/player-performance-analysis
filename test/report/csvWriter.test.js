@@ -77,3 +77,39 @@ test('toCsv never appends window columns when no row carries window data', () =>
 
   assert.equal(header, 'Rank,RankDelta,Player,Pos,Team,GP,TOI,PIR,PIRDelta,Total,TPE');
 });
+
+// ---------------------------------------------------------------------------
+// Status column
+// ---------------------------------------------------------------------------
+// Mirrors table.js's own hasVariedStatus rationale: a Status column only earns its place when
+// the exported rows actually carry more than one distinct status.
+
+test('toCsv appends a Status column when rows carry more than one distinct status', () => {
+  const csv = toCsv([makeRow({ name: 'Active', status: 'active' }), makeRow({ name: 'Retired', status: 'retired' })]);
+  const [header, row1, row2] = csv.split('\n');
+
+  assert.equal(header, 'Rank,RankDelta,Player,Pos,Team,GP,TOI,PIR,PIRDelta,Total,TPE,Status');
+  assert.ok(row1.endsWith(',active'));
+  assert.ok(row2.endsWith(',retired'));
+});
+
+test('toCsv never appends a Status column when every row shares the same status', () => {
+  const csv = toCsv([makeRow({ name: 'Alice', status: 'active' }), makeRow({ name: 'Bob', status: 'active' })]);
+  const [header] = csv.split('\n');
+
+  assert.equal(header, 'Rank,RankDelta,Player,Pos,Team,GP,TOI,PIR,PIRDelta,Total,TPE');
+});
+
+test('toCsv never appends a Status column when no row carries a status field at all', () => {
+  const csv = toCsv([makeRow(), makeRow({ name: 'Bob' })]);
+  const [header] = csv.split('\n');
+
+  assert.equal(header, 'Rank,RankDelta,Player,Pos,Team,GP,TOI,PIR,PIRDelta,Total,TPE');
+});
+
+test('toCsv renders a missing status as "unknown", not a blank field, once the column is shown', () => {
+  const csv = toCsv([makeRow({ name: 'Has Status', status: 'active' }), makeRow({ name: 'No Status' })]);
+  const [, , row2] = csv.split('\n');
+
+  assert.ok(row2.endsWith(',unknown'));
+});

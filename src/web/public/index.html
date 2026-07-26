@@ -53,6 +53,16 @@
       </section>
 
       <section class="rail-block">
+        <h2 class="rail-title">Status</h2>
+        <select id="statusSelect" class="select" aria-label="Player status filter">
+          <option value="all" selected>All players</option>
+          <option value="active">Active only</option>
+          <option value="inactive">Inactive only</option>
+        </select>
+        <p class="rail-note">Sourced from the Portal (a separate system from the league API), joined by exact player name. Unmatched or ambiguous names count as inactive.</p>
+      </section>
+
+      <section class="rail-block">
         <h2 class="rail-title">Window</h2>
         <select id="windowSelect" class="select" aria-label="Rolling window">
           <option value="" selected>Season to date</option>

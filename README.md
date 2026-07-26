@@ -86,6 +86,43 @@ Scored against one shared population, a defenseman's real defensive value gets d
 forward-shaped baseline. `--baseline=position` corrects that by comparing each player only to
 others at a similar position.
 
+## Player status filter
+
+`--status=active|inactive|all` (default `all`, no filtering) restricts `rank` to active or
+inactive players. Unlike everything else this tool computes, activity status is **not** sourced
+from the league's Index API (`index.simulationhockey.com`) at all -- that API has no status/
+active/inactive field anywhere. Instead it comes from a completely separate system, the
+**Portal** (`portal.simulationhockey.com`), whose own `/player` endpoint reports a `status` enum
+(`pending` | `denied` | `active` | `retired`) per player. "Active" means `status === 'active'`;
+"inactive" means anything else -- retired, pending, denied, and unmatched/ambiguous players (see
+below) all bucket into "inactive" for filtering purposes.
+
+**The join, and why it's by name:** the Portal's player id (`pid`) and the Index API's player id
+(`id`) are different, unrelated numeric spaces -- e.g. "Winston Coles" is `id: 2937` in the Index
+API but `pid: 2471` in the Portal. There is no shared numeric key, so the only reliable join
+available is the player's `name` string (see `joinPlayerStatusByName` in `src/playerStatus.js`).
+A name with no match in the Portal data, or with more than one Portal player sharing that exact
+name (an ambiguous match), is never guessed at -- it resolves to `'unknown'` rather than risking
+a silently wrong status pulled from an unrelated same-named player. `'unknown'` buckets the same
+way as any other non-active status: it counts as "inactive" when filtering.
+
+**League scope:** the Portal's own `leagueID` enum only cleanly covers SHL (`0`) and SMJHL (`1`).
+IIHF (`2`) requires querying the Portal "in tandem with a teamID" (a country id), which doesn't
+fit this tool's per-league capture model, and WJC (`3`) isn't in the Portal's `leagueID` enum at
+all. For those two leagues, the Portal fetch is skipped entirely and every player's status is
+`'unknown'` -- not an error, just an honest scope limit (see `src/snapshot.js`).
+
+**When it's fetched:** status is joined onto every player row at capture time (`update`), not
+looked up live by `rank` -- it becomes part of the persisted, timestamped snapshot, exactly like
+`appliedTPE` already is. A Portal fetch failure never fails `update`: it's caught, every player's
+status falls back to `'unknown'` for that capture, and a warning is surfaced alongside the
+capture result (in the CLI's stderr and the web panel's capture status line) so the fallback is
+never silent.
+
+A `Status` column appears in the table/CSV output only when the leaderboard actually contains
+more than one distinct status -- a fully-filtered view (`--status=active`, say) would otherwise
+show the same word on every row, which is clutter rather than information.
+
 ## Data store
 
 Every capture is self-describing and additive — nothing is ever silently overwritten:
@@ -197,7 +234,7 @@ feature needs real capture density to be useful — see "Automated capture" belo
 node index.js update --league=<0|1|2|3> [--season=<n>]
 node index.js rank   --league=<0|1|2|3> [--season=<n>] [--baseline=league|position]
                       [--no-movement] [--top=N] [--format=table|json|csv] [--out=<path>]
-                      [--shrink=<minutes>] [--window=<games>]
+                      [--shrink=<minutes>] [--window=<games>] [--status=active|inactive|all]
 ```
 
 League ids: `0` = SHL, `1` = SMJHL, `2` = IIHF, `3` = WJC. `--league` is required with no default —
@@ -248,8 +285,8 @@ Starts a local, dependency-free control panel (a raw `node:http` server, no Expr
 step) at `http://127.0.0.1:8765` — a browser-based alternative to running `update`/`rank` by hand,
 scoped to SHL and SMJHL. It shares the exact same scoring path as the CLI (`src/commands.js`), so
 a table/CSV/JSON export from the panel is byte-identical to the equivalent CLI invocation. League,
-season, baseline, movement, shrinkage, and rolling-window controls all map directly to the CLI
-flags above; a "Capture Snapshot" button drives `update` with a live elapsed-time readout in
+season, baseline, status, movement, shrinkage, and rolling-window controls all map directly to
+the CLI flags above; a "Capture Snapshot" button drives `update` with a live elapsed-time readout in
 place of a terminal command. The server binds to loopback only (no `--host` flag) since it writes
 files and makes live outbound API calls from browser input.
 

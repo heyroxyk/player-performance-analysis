@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
 import { fetchPlayerStats, fetchPlayerRatings } from './shlClient.js';
+import { fetchPortalPlayersByLeague } from './portalClient.js';
+import { joinPlayerStatusByName, UNKNOWN_STATUS } from './playerStatus.js';
 import { readLatest, writeCapture } from './store.js';
 
 // The ONLY players/stats fields persisted per skater. Everything else the raw
@@ -62,10 +64,58 @@ async function isSeasonFinished(_params) {
 export const defaultDeps = {
   fetchPlayerStats,
   fetchPlayerRatings,
+  fetchPortalPlayersByLeague,
   readLatest,
   writeCapture,
   isSeasonFinished,
 };
+
+// Portal's own leagueID enum only cleanly covers two of this tool's four league ids: 0 = SHL,
+// 1 = SMJHL. IIHF's Portal endpoint requires an additional teamID (country) parameter that
+// doesn't fit this tool's per-league capture model, and WJC isn't in Portal's leagueID enum at
+// all -- see README's "Player status filter" section. Both are out of scope for this feature,
+// so captureSnapshot skips the Portal fetch entirely for them below, rather than trying to be
+// clever about IIHF's teamID requirement.
+const PORTAL_LEAGUE_ID_BY_LEAGUE = { 0: 0, 1: 1 };
+
+/**
+ * Fetches every Portal player row for the league a capture is being taken for, ready to feed
+ * joinPlayerStatusByName -- or `portalPlayers: null` when the league is out of Portal's
+ * supported scope (IIHF, WJC) or the fetch itself failed. Either way, every player's status
+ * falls back to UNKNOWN_STATUS rather than crashing `update` over a second, non-critical data
+ * source: a `warning` string comes back alongside so the caller can surface WHY, without this
+ * needing a bigger error-reporting subsystem for one soft failure.
+ * @param {number} league
+ * @param {typeof defaultDeps} deps
+ * @returns {Promise<{portalPlayers: Array<object> | null, warning: string | null}>}
+ */
+async function fetchPortalPlayersForLeague(league, deps) {
+  const leagueID = PORTAL_LEAGUE_ID_BY_LEAGUE[league];
+  if (leagueID === undefined) {
+    return {
+      portalPlayers: null,
+      warning:
+        `Portal status lookup skipped: league ${league} isn't in Portal's supported scope ` +
+        `(IIHF needs an accompanying teamID, WJC has no Portal leagueID at all) -- every ` +
+        `player's status is '${UNKNOWN_STATUS}' for this capture.`,
+    };
+  }
+
+  try {
+    const { rows, truncated } = await deps.fetchPortalPlayersByLeague({ leagueID });
+    if (truncated) {
+      // Not fatal, and not worth blocking the capture over -- just a signal that this
+      // unpaginated fetch may not have gotten everyone, worth investigating if it recurs.
+      console.warn(`Portal player fetch for leagueID ${leagueID} returned exactly the requested limit -- results may be truncated.`);
+    }
+    return { portalPlayers: rows, warning: null };
+  } catch (error) {
+    return {
+      portalPlayers: null,
+      warning: `Portal status lookup failed (${error.message}) -- every player's status is '${UNKNOWN_STATUS}' for this capture.`,
+    };
+  }
+}
 
 // The raw players/stats rows each carry the season they belong to (see
 // test/fixtures.js makePlayerStatsRow). Resolving the season from the API's own answer --
@@ -125,10 +175,16 @@ export function playersFingerprint(players) {
  * capture schedule between game days. Neither skip avoids the network round trip -- there's no
  * way to know the data is unchanged without fetching it -- so this saves disk and git-history
  * churn, never an API call.
+ * `status` (see src/playerStatus.js) is joined onto every player row by exact name match
+ * against a fresh Portal fetch, so `rank` never needs a live Portal call of its own -- status
+ * becomes part of the persisted, timestamped capture, exactly like appliedTPE already is
+ * (including participating in the unchanged-capture fingerprint below: a Portal outage that
+ * flips every status to UNKNOWN_STATUS on an otherwise-unchanged capture IS treated as a change
+ * and gets written, the same way an appliedTPE-only change already is today).
  * @param {{league: number, season?: number}} params
  * @param {typeof defaultDeps} deps
  * @param {string | URL} [dataDirUrl]
- * @returns {Promise<{skipped: boolean, reason?: 'season-finished' | 'unchanged', snapshot: object}>}
+ * @returns {Promise<{skipped: boolean, reason?: 'season-finished' | 'unchanged', snapshot: object, warning?: string}>}
  */
 export async function captureSnapshot({ league, season }, deps = defaultDeps, dataDirUrl) {
   // Checking isSeasonFinished before touching disk avoids a wasted readLatest
@@ -141,25 +197,35 @@ export async function captureSnapshot({ league, season }, deps = defaultDeps, da
     }
   }
 
-  const [statsRows, ratingsRows] = await Promise.all([
+  const [statsRows, ratingsRows, portalResult] = await Promise.all([
     deps.fetchPlayerStats({ league, season }),
     deps.fetchPlayerRatings({ league, season }),
+    fetchPortalPlayersForLeague(league, deps),
   ]);
 
   const resolvedSeason = resolveSeason(statsRows, season);
 
   const appliedTpeById = new Map(ratingsRows.map((row) => [row.id, row.appliedTPE]));
-  const players = statsRows.map((row) => trimPlayerRow(row, appliedTpeById.get(row.id) ?? null));
+  const trimmedPlayers = statsRows.map((row) => trimPlayerRow(row, appliedTpeById.get(row.id) ?? null));
+
+  // portalResult.portalPlayers is null when the league is out of Portal's scope or the fetch
+  // failed (see fetchPortalPlayersForLeague above) -- either way, every player's status falls
+  // back to UNKNOWN_STATUS rather than joining against data we don't have.
+  const players = portalResult.portalPlayers
+    ? joinPlayerStatusByName(trimmedPlayers, portalResult.portalPlayers)
+    : trimmedPlayers.map((player) => ({ ...player, status: UNKNOWN_STATUS }));
+
+  const warningResult = portalResult.warning ? { warning: portalResult.warning } : {};
 
   const existingSnapshot = await deps.readLatest({ league, season: resolvedSeason }, dataDirUrl);
   if (existingSnapshot && playersFingerprint(existingSnapshot.players) === playersFingerprint(players)) {
-    return { skipped: true, reason: 'unchanged', snapshot: existingSnapshot };
+    return { skipped: true, reason: 'unchanged', snapshot: existingSnapshot, ...warningResult };
   }
 
   const snapshot = { league, season: resolvedSeason, capturedAt: new Date().toISOString(), players };
   await deps.writeCapture({ league, season: resolvedSeason, snapshot }, dataDirUrl);
 
-  return { skipped: false, snapshot };
+  return { skipped: false, snapshot, ...warningResult };
 }
 
 /**

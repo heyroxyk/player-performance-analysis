@@ -160,6 +160,22 @@ test('buildWindowRows treats a player absent from the anchor as a call-up: their
   assert.equal(summary.callUpCount, 1);
 });
 
+test('buildWindowRows carries the CURRENT row\'s status through untouched, as an identity field', () => {
+  // status (see src/playerStatus.js) doesn't get differenced like a counting stat -- it's
+  // carried straight from the current snapshot's row, exactly like name/position/team.
+  const player = makeWindowedPlayer({
+    id: 1, name: 'Status Carrier', position: 'C', team: 'ABC',
+    anchor: baseCounts(), window: windowCounts(),
+  });
+  const { anchor, current } = makeWindowPair([player]);
+  current.players[0] = { ...current.players[0], status: 'active' };
+  anchor.players[0] = { ...anchor.players[0], status: 'unknown' };
+
+  const { rows } = buildWindowRows(current, anchor);
+
+  assert.equal(rows[0].status, 'active');
+});
+
 test('buildWindowRows drops a row whose stats were corrected downward since the anchor, on ANY counting field', () => {
   const player = makeWindowedPlayer({
     id: 1, name: 'Corrected', position: 'C', team: 'ABC',

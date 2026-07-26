@@ -255,6 +255,11 @@ export function buildWindowRows(current, anchor) {
       FF: deltas.FF,
       FA: deltas.FA,
       appliedTPE: currentRow.appliedTPE,
+      // Carried straight from the current snapshot's row (see src/playerStatus.js) -- a
+      // player's Portal activity status doesn't get "differenced" like a counting stat, it's an
+      // identity field exactly like name/position/team above, so a --status filter works
+      // identically in window mode as it does season-to-date.
+      status: currentRow.status,
 
       seasonGamesPlayed: currentRow.gamesPlayed,
       seasonTimeOnIce: currentRow.timeOnIce,
