@@ -536,6 +536,20 @@ code {
   font-size: 13px;
 }
 
+/* A player name that links out to their Portal profile -- same weight/size as plain-text names
+   (see .player-cell) so a linked name doesn't visually stand out from an unlinked one; the cyan
+   hover + underline is the only cue, deliberately subtle since every row is already clickable
+   for its own, different purpose (expanding PIR component detail). */
+.player-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.player-link:hover {
+  color: var(--cyan);
+  text-decoration: underline;
+}
+
 .pir-cell {
   font-family: var(--font-display);
   font-weight: 700;

@@ -32,9 +32,15 @@ function groupPortalPlayersByName(portalPlayers) {
  * A player name absent from `portalPlayers`, or matching MORE THAN ONE Portal row, resolves to
  * UNKNOWN_STATUS rather than guessing -- both are real, expected outcomes of a name-based join
  * between two independently-run systems, not edge cases worth throwing over. Never mutates
- * `players`; returns a new array with a `status` field added to each row.
+ * `players`; returns a new array with `status` and `portalId` fields added to each row.
+ *
+ * `portalId` (the Portal's own `pid`, for linking to a player's Portal profile page --
+ * `https://portal.simulationhockey.com/player/<pid>`) rides along under the exact same
+ * ambiguity rule as `status`: null unless the name resolved to exactly one Portal row. It isn't
+ * a second, independent join -- a row with a resolved status and a row with a resolved portalId
+ * are, by construction, the identical match.
  * @param {Array<{name: string}>} players
- * @param {Array<{name: string, status: string}>} portalPlayers
+ * @param {Array<{name: string, status: string, pid: number}>} portalPlayers
  * @returns {Array<object>}
  */
 export function joinPlayerStatusByName(players, portalPlayers) {
@@ -42,7 +48,9 @@ export function joinPlayerStatusByName(players, portalPlayers) {
 
   return players.map((player) => {
     const matches = portalByName.get(player.name);
-    const status = matches?.length === 1 ? matches[0].status : UNKNOWN_STATUS;
-    return { ...player, status };
+    const isUniqueMatch = matches?.length === 1;
+    const status = isUniqueMatch ? matches[0].status : UNKNOWN_STATUS;
+    const portalId = isUniqueMatch ? matches[0].pid : null;
+    return { ...player, status, portalId };
   });
 }
