@@ -4,6 +4,7 @@ import {
   formatTimeOnIce,
   formatRankMovement,
   formatPirDelta,
+  formatRelativeTime,
   hasVariedStatus,
   matchesPositionFilter,
   filterRows,
@@ -29,6 +30,34 @@ test('formatPirDelta renders a signed value and NEW/hyphen the same way as table
   assert.equal(formatPirDelta({ pirDelta: 1.5 }), '+1.50');
   assert.equal(formatPirDelta({ pirDelta: -0.5 }), '-0.50');
   assert.equal(formatPirDelta({}), '-');
+});
+
+test('formatRelativeTime renders "just now" for anything under a minute old', () => {
+  const now = new Date('2026-07-26T12:00:00.000Z');
+  assert.equal(formatRelativeTime('2026-07-26T11:59:31.000Z', now), 'just now');
+});
+
+test('formatRelativeTime renders singular and plural minutes correctly', () => {
+  const now = new Date('2026-07-26T12:00:00.000Z');
+  assert.equal(formatRelativeTime('2026-07-26T11:59:00.000Z', now), '1 minute ago');
+  assert.equal(formatRelativeTime('2026-07-26T11:45:00.000Z', now), '15 minutes ago');
+});
+
+test('formatRelativeTime renders singular and plural hours correctly', () => {
+  const now = new Date('2026-07-26T12:00:00.000Z');
+  assert.equal(formatRelativeTime('2026-07-26T11:00:00.000Z', now), '1 hour ago');
+  assert.equal(formatRelativeTime('2026-07-26T09:00:00.000Z', now), '3 hours ago');
+});
+
+test('formatRelativeTime renders singular and plural days correctly', () => {
+  const now = new Date('2026-07-26T12:00:00.000Z');
+  assert.equal(formatRelativeTime('2026-07-25T12:00:00.000Z', now), '1 day ago');
+  assert.equal(formatRelativeTime('2026-07-24T00:00:00.000Z', now), '2 days ago');
+});
+
+test('formatRelativeTime treats a capturedAt technically in the future as "just now", not a negative duration', () => {
+  const now = new Date('2026-07-26T12:00:00.000Z');
+  assert.equal(formatRelativeTime('2026-07-26T12:05:00.000Z', now), 'just now');
 });
 
 test('matchesPositionFilter matches ALL, an exact position, and a broad F/D group', () => {

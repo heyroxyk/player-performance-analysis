@@ -2,6 +2,10 @@ import { readFile, writeFile, mkdir, readdir, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
+import { medianGamesPlayed } from './median.js';
+
+export { medianGamesPlayed };
+
 // Every capture is self-describing (it carries its own `league`/`season`/`capturedAt`), and
 // every league+season keeps a short run of timestamped captures rather than a single rotating
 // "current"/"previous" pair. There is deliberately no "current" bucket: a folder whose meaning
@@ -212,22 +216,6 @@ export async function readPrevious({ league, season }, dataDirUrl = defaultDataD
   const files = await listCaptures({ league, season: resolvedSeason }, dataDirUrl);
   if (files.length < 2) return null;
   return readCapture(files[1]);
-}
-
-/**
- * The median `gamesPlayed` across a capture's players -- used both to decide what retention
- * should keep (pruneOldCaptures) and to resolve "N games back" into an actual anchor capture
- * (findAnchorCapture). Exported (promoted from a private helper) so both call sites, and the
- * tests for each, agree on exactly what a capture's "depth" means.
- * @param {{players: Array<{gamesPlayed: number}>}} snapshot
- * @returns {number}
- */
-export function medianGamesPlayed(snapshot) {
-  const values = snapshot.players.map((player) => player.gamesPlayed).sort((a, b) => a - b);
-  if (values.length === 0) return 0;
-
-  const midIndex = Math.floor(values.length / 2);
-  return values.length % 2 === 0 ? (values[midIndex - 1] + values[midIndex]) / 2 : values[midIndex];
 }
 
 // Deletes captures older than the retention floor -- always keeping at least

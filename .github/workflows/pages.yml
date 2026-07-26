@@ -1,0 +1,83 @@
+# Builds and deploys the static/browser control panel (see scripts/buildSite.js, README's
+# "Hosting on GitHub Pages" section) to GitHub Pages. No npm dependencies to install and no
+# bundler -- the build step is exactly scripts/buildSite.js, which copies the browser-reachable
+# source files (src/web/staticAssets.js) plus whatever captures exist on `pir-data` into a
+# ready-to-serve static artifact.
+#
+# One-time manual setup (not done by this workflow): repo Settings -> Pages -> Source ==
+# "GitHub Actions". configure-pages@v5 below can sometimes enable this itself, but the Settings
+# toggle is the reliable path -- do it once before this workflow's first run.
+
+name: Deploy control panel to Pages
+
+on:
+  push:
+    branches: [master]
+  # Fires when capture.yml finishes -- a fresh capture should show up on the hosted site without
+  # waiting for an unrelated push to master. workflow_run only fires for workflow files that live
+  # on the repo's DEFAULT branch, which capture.yml does (see that file), so this works.
+  # NOTE: 'workflows' below matches capture.yml's `name:` field BY EXACT STRING -- renaming that
+  # workflow without updating this list silently stops redeploys-on-capture.
+  workflow_run:
+    workflows: ['Capture PIR snapshots']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy mid-flight -- a half-applied Pages deployment is a worse outcome than
+# one finishing a little late (same reasoning as capture.yml's own cancel-in-progress: false).
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Only build on a successful capture -- a failed capture run means pir-data didn't change,
+    # so there is nothing new to deploy and no reason to burn a build over it. Both the plain
+    # push and workflow_dispatch triggers are unaffected by this check (github.event_name is
+    # neither 'workflow_run' nor conditioned on conclusion for them).
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source (master)
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: code
+
+      - name: Check out data branch (pir-data)
+        uses: actions/checkout@v4
+        with:
+          ref: pir-data
+          path: data-branch
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Build the static site
+        working-directory: code
+        env:
+          PIR_DATA_DIR: ${{ github.workspace }}/data-branch/data
+        run: node scripts/buildSite.js --out="${{ github.workspace }}/_site"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

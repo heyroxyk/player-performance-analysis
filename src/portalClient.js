@@ -8,6 +8,12 @@
 const USER_AGENT = 'Mozilla/5.0 (compatible; SHL-PlayerImpact-Bot/1.0)';
 const PORTAL_API_V1 = 'https://portal.simulationhockey.com/api/v1';
 
+// `User-Agent` is a forbidden header name a page can never set -- fetch() silently drops it in a
+// browser, so setting it there would be dead code masking a real difference in what actually
+// goes over the wire. Node has no such restriction. Same check as src/shlClient.js's identical
+// constant, since both clients need the header only when actually running under Node.
+const REQUEST_HEADERS = typeof document === 'undefined' ? { 'User-Agent': USER_AGENT } : undefined;
+
 // Same reasoning as shlClient.js's identical constants: sized for this endpoint's occasional
 // multi-second stalls, not normal traffic, with a single retry to absorb a one-off blip.
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -30,7 +36,7 @@ async function fetchOnce(url) {
 
   let res;
   try {
-    res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: controller.signal });
+    res = await fetch(url, { headers: REQUEST_HEADERS, signal: controller.signal });
   } catch (error) {
     if (error.name === 'AbortError') {
       const timeoutError = new Error(`Portal API request timed out after ${REQUEST_TIMEOUT_MS}ms (${url})`);

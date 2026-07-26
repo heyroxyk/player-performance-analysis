@@ -277,18 +277,51 @@ snapshot has been captured yet for the given league/season, rather than printing
 
 ## Web control panel
 
+The control panel is a static, dependency-free browser client (`src/web/public/`, vanilla ES
+modules, no framework, no build step) that runs the exact same scoring path as the CLI
+(`src/commands.js`, `src/pir/*`, `src/report/*`) directly in the browser — a table/CSV/JSON
+export from the panel is byte-identical to the equivalent CLI invocation, because it's the same
+code, not a reimplementation. League, season, baseline, status, movement, shrinkage, and
+rolling-window controls all map directly to the CLI flags above. A "Captured N ago" readout next
+to the status pill shows how fresh the loaded data is, so there's never a need to guess whether a
+refresh is worth clicking.
+
+Two ways to run it:
+
 ```
 npm run serve
 ```
 
-Starts a local, dependency-free control panel (a raw `node:http` server, no Express, no build
-step) at `http://127.0.0.1:8765` — a browser-based alternative to running `update`/`rank` by hand,
-scoped to SHL and SMJHL. It shares the exact same scoring path as the CLI (`src/commands.js`), so
-a table/CSV/JSON export from the panel is byte-identical to the equivalent CLI invocation. League,
-season, baseline, status, movement, shrinkage, and rolling-window controls all map directly to
-the CLI flags above; a "Capture Snapshot" button drives `update` with a live elapsed-time readout in
-place of a terminal command. The server binds to loopback only (no `--host` flag) since it writes
-files and makes live outbound API calls from browser input.
+Starts a local server (a raw `node:http` server, no Express) at `http://127.0.0.1:8765` that
+serves this same static client plus a "Capture Snapshot" button, which drives `update` against a
+local disk capture with a live elapsed-time readout in place of a terminal command. The server
+binds to loopback only (no `--host` flag) since capturing writes files and makes live outbound
+API calls from browser input.
+
+The same client is also hosted on **GitHub Pages** — see below — where there's no server at all
+and no capture button; data comes from the daily automated capture instead (see "Automated
+capture" below). Locally vs. hosted, the only thing that differs is where a capture comes from
+(a live local disk vs. a prebuilt manifest baked into the deploy); the scoring is identical code
+either way, so the two can never drift into disagreeing about a ranking.
+
+### Hosting on GitHub Pages
+
+```
+npm run build:site -- --out=<dir>
+```
+
+Assembles the browser client, the `src/` modules it needs (`src/web/staticAssets.js` is the
+exact, literal list — the same list the local server's static routes are built from, so a file
+that loads locally can never be missing from the deployed site), and every capture file under
+`PIR_DATA_DIR` into `<dir>`, a ready-to-serve static artifact — plus `data/index.json`, a
+generated manifest indexing every capture's `capturedAt`/`medianGamesPlayed`/`playerCount` so the
+browser can pick a rolling-window anchor from a few hundred bytes of JSON rather than fetching
+every capture in a season to inspect it.
+
+`.github/workflows/pages.yml` runs this build on every push to `master` and on every successful
+run of the capture workflow (so a fresh daily capture shows up on the hosted site automatically),
+checking out `pir-data` as the capture source — the repo must be public for Pages to work on the
+free plan, and Settings → Pages → Source must be set to "GitHub Actions" once, manually.
 
 ## Automated capture
 

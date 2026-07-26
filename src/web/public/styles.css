@@ -148,6 +148,20 @@ code {
   border-color: var(--ember-dim);
 }
 
+/* Shows how long ago the current leaderboard's data was captured, so the panel reads as
+   already-current rather than implying a live refresh is something the user needs to reach
+   for. Empty (no text, no space taken) until a ranking has actually loaded. */
+.freshness-readout:empty {
+  display: none;
+}
+
+/* Past ~36h a capture is old enough that it likely means a scheduled capture was missed --
+   the same amber the busy status-pill state already uses, so the panel has one consistent
+   "something needs attention, though nothing is broken" color. */
+.freshness-readout.stale {
+  color: var(--amber);
+}
+
 /* ---------------------------------------------------------------------- layout */
 
 .layout {
