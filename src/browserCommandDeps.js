@@ -11,8 +11,14 @@ import { filterScoreableRows, computePir, rankByPir, adaptiveShrinkageMinutes } 
 import { buildWindowRows, evaluateWindowQuality } from './pir/window.js';
 import { POSITION_GROUPS } from './pir/components.js';
 import { formatTable } from './report/table.js';
-import { toJson } from './report/jsonWriter.js';
+import { toJson, toGoalieJson } from './report/jsonWriter.js';
 import { toCsv } from './report/csvWriter.js';
+import {
+  filterScoreableGoalieRows, goalieBaseline, adaptiveShrinkageShots, computeGoalieImpact, rankByGir,
+} from './pir/goalieEngine.js';
+import { buildGoalieWindowRows, evaluateGoalieWindowQuality } from './pir/goalieWindow.js';
+import { formatGoalieTable } from './report/goalieTable.js';
+import { toGoalieCsv } from './report/goalieCsvWriter.js';
 
 /**
  * Builds a CommandDeps object (see src/commands.js's typedef) backed by a browser store rather
@@ -39,9 +45,21 @@ export function createBrowserCommandDeps({ store, buildDeps = defaultBuildDeps }
     toJson,
     toCsv,
     POSITION_GROUPS,
+    filterScoreableGoalieRows,
+    goalieBaseline,
+    adaptiveShrinkageShots,
+    computeGoalieImpact,
+    rankByGir,
+    buildGoalieWindowRows,
+    evaluateGoalieWindowQuality,
+    formatGoalieTable,
+    toGoalieJson,
+    toGoalieCsv,
     // No disk to write to and no unchanged-capture dedupe to check against (that comparison is
-    // what src/snapshot.js's node adapter does with playersFingerprint + node:crypto) -- a
-    // browser "capture" is always fresh, ephemeral, and never skipped.
+    // what src/snapshot.js's node adapter does with snapshotFingerprint + node:crypto) -- a
+    // browser "capture" is always fresh, ephemeral, and never skipped. Produces both players AND
+    // goalies (see src/snapshotBuild.js's buildSnapshot), so this one function serves both
+    // src/commands.js's and src/goalieCommands.js's captureSnapshot key.
     captureSnapshot: async ({ league, season }) => {
       const { snapshot, warning } = await buildSnapshot({ league, season }, buildDeps);
       return { skipped: false, snapshot, ...(warning ? { warning } : {}) };

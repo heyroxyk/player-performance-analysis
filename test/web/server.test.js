@@ -16,37 +16,12 @@ function trackCalls(impl = () => undefined) {
   return fn;
 }
 
+// Only captureSnapshot is exercised through this server anymore -- POST /api/update is the one
+// route left (see src/web/apiRoutes.js's header comment for why the rank/export/leagues/
+// snapshots routes and their fakes are gone).
 function makeCommandsDeps(overrides = {}) {
   return {
     captureSnapshot: trackCalls(async () => ({ skipped: false, snapshot: makeSnapshot() })),
-    readLatest: trackCalls(async () => makeSnapshot()),
-    readPrevious: trackCalls(async () => null),
-    findAnchorCapture: trackCalls(async () => ({ anchor: null, reason: 'only one capture on disk -- a window needs at least two' })),
-    buildWindowRows: trackCalls(() => ({ rows: [], dropped: [], summary: {} })),
-    evaluateWindowQuality: trackCalls(({ anchorReason } = {}) => (
-      anchorReason ? { blockers: [anchorReason], warnings: [] } : { blockers: [], warnings: [] }
-    )),
-    adaptiveShrinkageMinutes: trackCalls(() => 400),
-    filterScoreableRows: trackCalls((players) => ({ usable: players, excluded: [] })),
-    computePir: trackCalls((rows) => rows.map((row) => ({ ...row, pir: 1.5, totalImpact: 2.5, components: {} }))),
-    rankByPir: trackCalls((rows) => rows),
-    computeMovement: trackCalls((currentRows) => currentRows),
-    formatTable: trackCalls(() => 'TABLE OUTPUT'),
-    toJson: trackCalls(() => 'JSON OUTPUT'),
-    toCsv: trackCalls(() => 'CSV,OUTPUT\n1,2,3'),
-    writeFile: trackCalls(async () => undefined),
-    POSITION_GROUPS: { C: 'F', LW: 'F', RW: 'F', LD: 'D', RD: 'D' },
-    ...overrides,
-  };
-}
-
-function makeSnapshotIndexDeps(overrides = {}) {
-  return {
-    listSeasons: trackCalls(async () => [89]),
-    listCaptures: trackCalls(async () => ['a.json']),
-    readLatest: trackCalls(async () => makeSnapshot()),
-    readPrevious: trackCalls(async () => null),
-    getDataDir: trackCalls(() => '/fake/data'),
     ...overrides,
   };
 }
@@ -57,15 +32,14 @@ function makeSnapshotIndexDeps(overrides = {}) {
 // fetch/undici keeps sockets alive in a pool, and without it server.close()'s callback never
 // fires because it waits for existing connections to drain -- the test run would hang.
 async function withServer(depsOverrides, fn) {
-  const commandsDeps = makeCommandsDeps(depsOverrides?.commands);
-  const snapshotIndexDeps = makeSnapshotIndexDeps(depsOverrides?.snapshotIndex);
-  const server = createControlPanelServer({ commandsDeps, snapshotIndexDeps });
+  const commandsDeps = makeCommandsDeps(depsOverrides);
+  const server = createControlPanelServer({ commandsDeps });
 
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const { port } = server.address();
 
   try {
-    await fn({ baseUrl: `http://127.0.0.1:${port}`, port, commandsDeps, snapshotIndexDeps });
+    await fn({ baseUrl: `http://127.0.0.1:${port}`, port, commandsDeps });
   } finally {
     server.closeAllConnections();
     await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
@@ -115,287 +89,6 @@ test('GET /favicon.ico returns 204 rather than a 404', async () => {
   await withServer(undefined, async ({ baseUrl }) => {
     const res = await fetch(baseUrl + '/favicon.ico');
     assert.equal(res.status, 204);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// GET /api/leagues, /api/snapshots
-// ---------------------------------------------------------------------------
-
-test('GET /api/leagues returns SHL and SMJHL', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/leagues');
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.deepEqual(body.leagues.map((l) => l.id), [0, 1]);
-  });
-});
-
-test('GET /api/snapshots requires a league param', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/snapshots');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/snapshots returns the league\'s season list', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/snapshots?league=1');
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.equal(body.league, 1);
-    assert.equal(body.dataDir, '/fake/data');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// GET /api/rank -- validation
-// ---------------------------------------------------------------------------
-
-test('GET /api/rank rejects an out-of-range league', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=9');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank rejects a non-integer season instead of letting it reach the filesystem', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&season=' + encodeURIComponent('../../etc'));
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank rejects a season with trailing garbage', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&season=89abc');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank rejects an unrecognized query parameter', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&bogus=1');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank rejects an invalid baseline', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&baseline=team');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank rejects an invalid status value the same way an invalid baseline already is', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&status=retired');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank defaults status to "all" when the param is omitted', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1');
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.equal(body.meta.status, 'all');
-  });
-});
-
-test('GET /api/rank?status=active accepts the param and reflects it in meta', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&status=active');
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.equal(body.meta.status, 'active');
-  });
-});
-
-test('GET /api/rank?status=active excludes an inactive player with a reason, matching the CLI\'s filtering behavior', async () => {
-  await withServer(
-    {
-      commands: {
-        readLatest: trackCalls(async () => makeSnapshot({
-          players: [
-            { id: 1, name: 'Active Player', status: 'active' },
-            { id: 2, name: 'Retired Player', status: 'retired' },
-          ],
-        })),
-      },
-    },
-    async ({ baseUrl }) => {
-      const res = await fetch(baseUrl + '/api/rank?league=1&status=active&movement=false');
-      assert.equal(res.status, 200);
-      const body = await res.json();
-      assert.deepEqual(body.players.map((row) => row.id), [1]);
-      assert.deepEqual(body.excluded.map((entry) => entry.reason), ['inactive status']);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// GET /api/rank -- behavior
-// ---------------------------------------------------------------------------
-
-test('GET /api/rank returns meta, players, and excluded', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1');
-    assert.equal(res.status, 200);
-    const body = await res.json();
-    assert.ok(body.meta);
-    assert.ok(Array.isArray(body.players));
-    assert.ok(Array.isArray(body.excluded));
-  });
-});
-
-test('GET /api/rank with movement=false never calls readPrevious', async () => {
-  await withServer(undefined, async ({ baseUrl, commandsDeps }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&movement=false');
-    assert.equal(res.status, 200);
-    assert.equal(commandsDeps.readPrevious.calls.length, 0);
-  });
-});
-
-test('GET /api/rank returns 404 with an actionable message when no snapshot exists', async () => {
-  await withServer({ commands: { readLatest: trackCalls(async () => null) } }, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&season=89');
-    assert.equal(res.status, 404);
-    const body = await res.json();
-    assert.equal(body.code, 'NO_SNAPSHOT');
-    assert.match(body.error, /update --league=1 --season=89/);
-  });
-});
-
-test('GET /api/rank builds a position groupBy from --baseline=position', async () => {
-  await withServer(undefined, async ({ baseUrl, commandsDeps }) => {
-    await fetch(baseUrl + '/api/rank?league=1&baseline=position');
-    const [, options] = commandsDeps.computePir.calls[0];
-    assert.equal(typeof options.groupBy, 'function');
-    assert.equal(options.groupBy({ position: 'LD' }), 'D');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// GET /api/rank -- window mode
-// ---------------------------------------------------------------------------
-
-test('GET /api/rank rejects a non-integer window', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&window=abc');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank rejects window=0 as meaningless', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&window=0');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/rank?window=12 reaches getRanking/buildWindowRows with the parsed value', async () => {
-  const windowRows = [{ id: 1, timeOnIce: 1000, gamesPlayed: 5 }];
-  await withServer(
-    {
-      commands: {
-        findAnchorCapture: trackCalls(async () => ({ anchor: makeSnapshot(), reason: null, resolvedGames: 12 })),
-        buildWindowRows: trackCalls(() => ({
-          rows: windowRows,
-          dropped: [],
-          summary: {
-            medianToiFraction: 0.4, playerCount: 1, droppedCount: 0, callUpCount: 0,
-            anchorCapturedAt: '2026-07-01T12:00:00.000Z', medianWindowGamesPlayed: 5, medianWindowTimeOnIce: 1000, tradedCount: 0,
-          },
-        })),
-        evaluateWindowQuality: trackCalls(() => ({ blockers: [], warnings: [] })),
-      },
-    },
-    async ({ baseUrl, commandsDeps }) => {
-      const res = await fetch(baseUrl + '/api/rank?league=1&window=12');
-      assert.equal(res.status, 200);
-      const body = await res.json();
-      assert.equal(body.meta.window.requestedGames, 12);
-      assert.equal(body.meta.window.resolvedGames, 12);
-      const [rowsPassed] = commandsDeps.computePir.calls[0];
-      assert.deepEqual(rowsPassed, windowRows);
-    },
-  );
-});
-
-test('GET /api/rank?window=12 returns 409 WINDOW_UNAVAILABLE when no anchor capture exists', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/rank?league=1&window=12');
-    assert.equal(res.status, 409);
-    const body = await res.json();
-    assert.equal(body.code, 'WINDOW_UNAVAILABLE');
-    assert.match(body.error, /only one capture on disk/);
-  });
-});
-
-test('GET /api/export?window=12 is accepted (window inherits from the shared KNOWN_RANK_PARAMS set)', async () => {
-  await withServer(
-    {
-      commands: {
-        findAnchorCapture: trackCalls(async () => ({ anchor: makeSnapshot(), reason: null, resolvedGames: 12 })),
-        buildWindowRows: trackCalls(() => ({
-          rows: [{ id: 1, timeOnIce: 1000, gamesPlayed: 5 }],
-          dropped: [],
-          summary: { medianToiFraction: 0.4, playerCount: 1, droppedCount: 0, callUpCount: 0, anchorCapturedAt: 'x', medianWindowGamesPlayed: 5, medianWindowTimeOnIce: 1000, tradedCount: 0 },
-        })),
-        evaluateWindowQuality: trackCalls(() => ({ blockers: [], warnings: [] })),
-      },
-    },
-    async ({ baseUrl }) => {
-      const res = await fetch(baseUrl + '/api/export?league=1&window=12&format=json');
-      assert.equal(res.status, 200);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// GET /api/export
-// ---------------------------------------------------------------------------
-
-test('GET /api/export?format=csv returns text/csv with a Content-Disposition attachment, byte-identical to toCsv\'s output', async () => {
-  await withServer(undefined, async ({ baseUrl, commandsDeps }) => {
-    const res = await fetch(baseUrl + '/api/export?league=1&format=csv');
-    assert.equal(res.status, 200);
-    assert.match(res.headers.get('content-type'), /text\/csv/);
-    assert.match(res.headers.get('content-disposition'), /attachment; filename="pir-league1-season89\.csv"/);
-    const body = await res.text();
-    assert.equal(commandsDeps.toCsv.calls.length, 1);
-    assert.equal(body, 'CSV,OUTPUT\n1,2,3');
-  });
-});
-
-test('GET /api/export defaults to the table format, matching the CLI default', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/export?league=1');
-    assert.match(res.headers.get('content-type'), /text\/plain/);
-    const body = await res.text();
-    assert.equal(body, 'TABLE OUTPUT');
-  });
-});
-
-test('GET /api/export rejects an invalid format', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/export?league=1&format=xml');
-    assert.equal(res.status, 400);
-  });
-});
-
-test('GET /api/export?status=active is accepted (status inherits from the shared KNOWN_RANK_PARAMS set)', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/export?league=1&status=active&format=json');
-    assert.equal(res.status, 200);
-  });
-});
-
-test('GET /api/export rejects an invalid status value', async () => {
-  await withServer(undefined, async ({ baseUrl }) => {
-    const res = await fetch(baseUrl + '/api/export?league=1&status=retired');
-    assert.equal(res.status, 400);
   });
 });
 
@@ -486,7 +179,7 @@ test('GET /api/update (wrong method) returns 405 with an Allow header', async ()
 
 test('POST /api/update maps an upstream captureSnapshot failure to 502 without leaking a stack trace', async () => {
   await withServer(
-    { commands: { captureSnapshot: trackCalls(async () => { throw new Error('SHL API request timed out after 30000ms'); }) } },
+    { captureSnapshot: trackCalls(async () => { throw new Error('SHL API request timed out after 30000ms'); }) },
     async ({ baseUrl }) => {
       const res = await fetch(baseUrl + '/api/update', {
         method: 'POST',
@@ -507,12 +200,10 @@ test('a second POST /api/update for the same league+season while one is in fligh
 
   await withServer(
     {
-      commands: {
-        captureSnapshot: trackCalls(async () => {
-          await gate;
-          return { skipped: false, snapshot: makeSnapshot() };
-        }),
-      },
+      captureSnapshot: trackCalls(async () => {
+        await gate;
+        return { skipped: false, snapshot: makeSnapshot() };
+      }),
     },
     async ({ baseUrl }) => {
       const firstRequest = fetch(baseUrl + '/api/update', {

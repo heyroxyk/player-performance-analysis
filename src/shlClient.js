@@ -133,6 +133,34 @@ export function fetchPlayerRatings({ league, season } = {}) {
 }
 
 /**
+ * Season-to-date cumulative goalie stats, one row per goalie -- a completely
+ * separate endpoint from fetchPlayerStats, which explicitly excludes goalies.
+ * Shape has no `advancedStats` object at all, and `minutes` arrives in
+ * minutes (not seconds, unlike a skater row's `timeOnIce`). Omitting `season`
+ * returns the current season.
+ * @param {{league: number, season?: number}} params
+ * @returns {Promise<Array<object>>}
+ */
+export function fetchGoalieStats({ league, season } = {}) {
+  const params = new URLSearchParams({ league });
+  if (season !== undefined) params.set('season', season);
+  return apiGet(`${INDEX_API_V1}/goalies/stats?${params}`);
+}
+
+/**
+ * Goalie attribute ratings (appliedTPE and per-attribute values), one row
+ * per goalie. Join to fetchGoalieStats results by numeric `id`. Omitting
+ * `season` returns the current season.
+ * @param {{league: number, season?: number}} params
+ * @returns {Promise<Array<object>>}
+ */
+export function fetchGoalieRatings({ league, season } = {}) {
+  const params = new URLSearchParams({ league });
+  if (season !== undefined) params.set('season', season);
+  return apiGet(`${INDEX_API_V1}/goalies/ratings?${params}`);
+}
+
+/**
  * Team standings for a specific league/season. Unlike the other endpoints
  * here, both params are required: standings are inherently season-scoped and
  * the API has no meaningful "current" default to fall back on for this call.

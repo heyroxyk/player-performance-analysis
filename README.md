@@ -282,6 +282,120 @@ node index.js rank --league=1 --season=86 --format=json --out=rankings.json
 `rank` errors with an actionable message (including the exact `update` command to run) if no
 snapshot has been captured yet for the given league/season, rather than printing an empty table.
 
+## Goalie support
+
+`grank` is the goalie leaderboard, a genuine sibling of `rank` rather than the same metric relabeled
+— goalies share almost no stat fields with skaters (no `advancedStats` object at all) and the
+underlying signal behaves differently enough that reusing PIR's 8-component z-score would be
+actively misleading. `update` captures both positions together in one snapshot; `grank` scores the
+`goalies[]` half of it.
+
+```
+node index.js grank --league=<0|1|2|3> [--season=<n>]
+                     [--no-movement] [--top=N] [--format=table|json|csv] [--out=<path>]
+                     [--shrink=<shots>] [--window=<games>] [--status=active|inactive|all]
+```
+
+Note what's absent compared to `rank`: no `--baseline` (a single-position pool has nothing to
+segment), and `--shrink` is in **shots faced**, not minutes — passing a flag `grank` doesn't accept
+(`--baseline=position`, say) is a usage error, not a silent no-op.
+
+### GIR and GSAR
+
+Two numbers, mirroring the `pir` / `totalImpact` split exactly:
+
+- **GIR (Goalie Impact Rating)** — `1000 * (shrunkSavePct - replacementSavePct)`: goals saved per
+  1000 shots faced, above replacement. This is the rank-by column. Deliberately **not** a z-score —
+  with exactly one scored component there's nothing to make commensurable, and standardizing a
+  heavily-shrunk save percentage would compress the whole board into an unreadable band where every
+  goalie "rounds to about half". Goals-per-1000-shots stays interpretable at any shrinkage level.
+- **GSAR (Goals Saved Above Replacement)** — `saves - shotsAgainst * replacementSavePct`, using the
+  **observed** (never shrunk) save percentage. This is the accumulation column, the `totalImpact`
+  analogue. Unlike `totalImpact`, it deliberately does not shrink: shrinking a counting stat made it
+  76-92% correlated with shots faced and put every goalie in the league above replacement, including
+  the actual worst goalie by save percentage — a minutes-played ranking wearing a value-metric
+  costume. Goals prevented is accounting, not estimation: `saves + goalsAgainst === shotsAgainst`
+  holds exactly on every row, so there's nothing to regress.
+- **GSAA (Goals Saved Above Average)** — `saves - shotsAgainst * leagueSavePct`, the same idea
+  against the league mean instead of replacement. Sums to exactly 0 across a full population, which
+  is what makes it a useful accounting check rather than a scored metric.
+- **luck** — `gsar - expectedGsar`, where `expectedGsar = gir * shotsAgainst / 1000`. The gap
+  between what a goalie's rate says they should have saved and what they actually saved, often the
+  single most informative column on the board.
+
+**Only save percentage is scored.** Measured directly against real captures: GAA correlates +0.78
+with shots-against/60 (mostly team defence, not the goalie), win% correlates -0.83 with
+shots-against/60 (almost purely a team artifact), and gameRating correlates +0.88 with save
+percentage (a near-restatement of it). gameRating looked like it might carry incremental signal —
+its residual correlates with `appliedTPE` more strongly than save percentage's own does — but the
+real test is out-of-sample prediction: does one season's gameRating predict the next season's save
+percentage beyond what that season's own save percentage already predicts? The answer came back
+negative in both leagues, so gameRating adds nothing. GAA, wins/losses/OT, shutouts, gameRating, and
+`appliedTPE` are all still shown on the board as real context — just never fed into GIR or GSAR. See
+`src/pir/goalieComponents.js` for the full correlation table and the out-of-sample test.
+
+### Replacement level and shrinkage
+
+`replacementSavePct = leagueSavePct - 0.015` — a fixed 1.5 percentage points below the shot-weighted
+league save percentage, the standard definition in the sports-analytics literature. The skater
+side's relative `replacementMean()` (mean ± 10%) doesn't work here: applied to a league save
+percentage around .882 it returns roughly .794, below the worst goalie in the actual population, so
+every goalie would score positive and the metric would be meaningless. An empirical alternative
+(bottom-quartile-by-shots, minutes thresholds, etc.) was tried and rejected — the gap it implied
+ranged from 0.000 to 0.024 depending on an arbitrary cutoff, an order of magnitude of instability
+versus one fixed, documented number.
+
+`K`, the shrinkage constant (in **shots faced**, not minutes), comes from decomposing observed
+save-percentage spread into real talent variance and binomial luck variance, always over the full
+scoreable population for that capture (subsetting by a shots-faced threshold made K wildly unstable
+during research — even flip sign — which turned out to be an artifact of the subsetting, not a real
+property of the data). It's corroborated by a second, independent method (season-over-season
+predictive reliability): the two agree within 20-40% of each other, which is real corroboration, not
+coincidence. `K` is clamped to `[250, 3000]` shots (neither bound has bound on any real population
+observed so far) and defaults to 1200 when it can't be estimated at all. When the observed spread
+comes out no wider than binomial luck alone would predict, every goalie's GIR collapses toward the
+league mean and a `noSignal: true` flag is set — surfaced as an explicit warning in the CLI header
+and the web panel rather than silently producing a near-arbitrary leaderboard. Pass
+`--shrink=<shots>` to override with an explicit constant.
+
+Every scored row carries **own signal** — `shotsAgainst / (shotsAgainst + K)` — so it's visible at a
+glance how much of a given goalie's GIR is their own observed performance versus the league prior.
+At a typical mid-season sample size, this is often well under half.
+
+### Goalie rolling windows
+
+`--window=<games>` works the same way as the skater side, with one real simplification: every
+goalie stat that matters (`shotsAgainst`, `saves`, `goalsAgainst`, `minutes`, `gamesPlayed`,
+`shutouts`) is a raw cumulative counter, and `saves + goalsAgainst === shotsAgainst` holds for a
+window exactly the same way it holds for a season. Window save percentage is therefore
+`(saves_now - saves_anchor) / (shotsAgainst_now - shotsAgainst_anchor)` — an **exact** difference,
+with none of the per-60 rate un-averaging or team-aggregate reconstruction the skater window needs
+(see "Rolling window analytics" above). The quality gate is the window's median shots faced
+(below 60 shots the request is refused outright; between 60 and 150 it's shown with an explicit
+warning), replacing the skater side's TOI-fraction thresholds, since those measure reconstruction
+error that doesn't exist here.
+
+`K` and the replacement/league baseline for a windowed ranking are derived from the current
+capture's **season-to-date** goalie population, not the window rows themselves — a deliberate
+divergence from how a skater window computes its own population baseline. `K` estimates a physical
+property of league talent spread that doesn't shrink just because fewer games were looked at, and a
+window population this small would collapse to `noSignal` almost every time.
+
+### Capture schema
+
+Goalies are captured in the **same snapshot file** as skaters, under a new `goalies: []` key, so
+they share the exact same capture cadence, retention, and rolling-window anchor selection —
+`update`'s output line reports both counts (`Captured N players and M goalies...`). Only raw
+counters are persisted (`shotsAgainst`, `saves`, `goalsAgainst`, `minutes`, `gamesPlayed`, etc.);
+`savePct` and `gaa` are never stored, since the raw API returns them as rounded strings — save
+percentage is always recomputed from `saves`/`shotsAgainst` at scoring time so it never loses
+precision.
+
+A capture with no `goalies` key at all (written before this feature existed) is treated differently
+from one with `goalies: []`: the former means "this capture predates goalie support" and `grank`
+errors with an actionable message to re-run `update`; the latter is a valid, empty ranking meaning
+"no goalies recorded this capture." The two are never conflated.
+
 ## Web control panel
 
 The control panel is a static, dependency-free browser client (`src/web/public/`, vanilla ES
@@ -292,6 +406,21 @@ code, not a reimplementation. League, season, baseline, status, movement, shrink
 rolling-window controls all map directly to the CLI flags above. A "Captured N ago" readout next
 to the status pill shows how fresh the loaded data is, so there's never a need to guess whether a
 refresh is worth clicking.
+
+A **Skaters | Goalies** mode toggle switches the whole panel between `rank` and `grank` — same
+capture, same controls where they apply (league, season, status, movement, shrinkage, window), with
+baseline hidden in Goalies mode since it has no meaning for a single-position pool. Goalie mode adds
+its own rail note on shrinkage units (shots faced, not minutes) and a persistent caption reporting
+league/replacement save percentage, resolved K, and median own-signal for the population on screen,
+plus a page-level warning when `noSignal` is set. See "Goalie support" above for what these numbers
+mean.
+
+A "Live Refresh" button, always present (locally and on the hosted site alike), fetches that
+league's current-season stats straight from the league API into the browser's memory — no disk
+write, no server round trip — and scores them the same way as any other snapshot. It's optional:
+the loaded data is already current, this just lets you see the last few minutes of games before
+the next scheduled capture picks them up. The freshness readout marks a live-refreshed leaderboard
+as "live, not saved" so it's never mistaken for a real, persisted capture.
 
 Two ways to run it:
 
@@ -306,10 +435,12 @@ binds to loopback only (no `--host` flag) since capturing writes files and makes
 API calls from browser input.
 
 The same client is also hosted on **GitHub Pages** — see below — where there's no server at all
-and no capture button; data comes from the daily automated capture instead (see "Automated
-capture" below). Locally vs. hosted, the only thing that differs is where a capture comes from
-(a live local disk vs. a prebuilt manifest baked into the deploy); the scoring is identical code
-either way, so the two can never drift into disagreeing about a ranking.
+and no "Capture Snapshot" button (that one writes to disk, which only the local server can do);
+its saved data comes from the daily automated capture instead (see "Automated capture" below).
+Locally vs. hosted, the only thing that differs is where a *saved* capture comes from (a live
+local disk vs. a prebuilt manifest baked into the deploy); the scoring is identical code either
+way, so the two can never drift into disagreeing about a ranking. Live Refresh needs no disk at
+all, so it works identically in both places.
 
 ### Hosting on GitHub Pages
 

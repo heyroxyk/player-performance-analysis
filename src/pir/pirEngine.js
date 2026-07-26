@@ -144,7 +144,7 @@ export function computePir(rows, { groupBy = null, shrinkageMinutes = DEFAULT_SH
     for (const component of PIR_COMPONENTS) {
       const { mean, stdev, replacementMean: componentReplacementMean } = statsByComponent.get(component.key);
       const rawValue = component.getRawValue(row);
-      const shrunkValue = shrinkToMean(rawValue, { mean, timeOnIce: row.timeOnIce, constant: shrinkageConstant });
+      const shrunkValue = shrinkToMean(rawValue, { mean, evidence: row.timeOnIce, constant: shrinkageConstant });
       const componentZScore = zScore({ rawValue: shrunkValue, replacementMean: componentReplacementMean, stdev });
       const weighted = componentZScore * component.weight;
 

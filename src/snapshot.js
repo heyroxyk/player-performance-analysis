@@ -37,20 +37,30 @@ export const defaultDeps = {
 };
 
 /**
- * A stable fingerprint of a snapshot's player data, independent of array order -- two captures
- * with the same fingerprint describe the same league state, so the second one adds nothing but
- * a file (and, per store.js's findAnchorCapture, a candidate window anchor that would resolve
- * to a zero-game span). Order-insensitive by design: the API's row ordering has been stable
- * across every real capture pair seen so far, but that isn't a contractual guarantee, and a
- * re-sort must never register as a "change". Sorting by id before stringifying is safe
- * regardless of key order, since trimPlayerRow always builds its keys from the same fixed
- * STORED_STAT_FIELDS list.
- * @param {Array<object>} players
+ * A stable fingerprint of a snapshot's player AND goalie data, independent of array order --
+ * two captures with the same fingerprint describe the same league state, so the second one adds
+ * nothing but a file (and, per store.js's findAnchorCapture, a candidate window anchor that
+ * would resolve to a zero-game span). Order-insensitive by design: the API's row ordering has
+ * been stable across every real capture pair seen so far, but that isn't a contractual
+ * guarantee, and a re-sort must never register as a "change". Sorting by id before stringifying
+ * is safe regardless of key order (trimPlayerRow/trimGoalieRow always build their keys from a
+ * fixed field list) and safe across the two arrays (verified zero id collisions between the
+ * players/stats and goalies/stats endpoints in real captures).
+ *
+ * `snapshot.goalies` defaults to `[]` via `?? []` rather than being read directly -- a capture
+ * from before goalie support existed has no `goalies` key at all (`undefined`), and
+ * JSON.stringify silently drops `undefined` object keys, so without this default an old
+ * goalie-less capture and a new capture with a genuinely empty goalie array would hash
+ * differently for a spurious reason (key presence, not content). With it, they hash identically,
+ * and a capture that gains REAL goalie rows for the first time correctly hashes differently
+ * (there is new information) and triggers a real write rather than a false "unchanged".
+ * @param {{players: Array<object>, goalies?: Array<object>}} snapshot
  * @returns {string}
  */
-export function playersFingerprint(players) {
-  const sortedById = [...players].sort((a, b) => a.id - b.id);
-  return createHash('sha256').update(JSON.stringify(sortedById)).digest('hex');
+export function snapshotFingerprint(snapshot) {
+  const sortedPlayers = [...snapshot.players].sort((a, b) => a.id - b.id);
+  const sortedGoalies = [...(snapshot.goalies ?? [])].sort((a, b) => a.id - b.id);
+  return createHash('sha256').update(JSON.stringify({ players: sortedPlayers, goalies: sortedGoalies })).digest('hex');
 }
 
 /**
@@ -94,7 +104,7 @@ export async function captureSnapshot({ league, season }, deps = defaultDeps, da
   const warningResult = warning ? { warning } : {};
 
   const existingSnapshot = await deps.readLatest({ league, season: snapshot.season }, dataDirUrl);
-  if (existingSnapshot && playersFingerprint(existingSnapshot.players) === playersFingerprint(snapshot.players)) {
+  if (existingSnapshot && snapshotFingerprint(existingSnapshot) === snapshotFingerprint(snapshot)) {
     return { skipped: true, reason: 'unchanged', snapshot: existingSnapshot, ...warningResult };
   }
 

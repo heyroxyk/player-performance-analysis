@@ -4,6 +4,7 @@ import {
   formatTimeOnIce,
   formatRankMovement,
   formatPirDelta,
+  formatGirDelta,
   formatRelativeTime,
   hasVariedStatus,
   matchesPositionFilter,
@@ -30,6 +31,13 @@ test('formatPirDelta renders a signed value and NEW/hyphen the same way as table
   assert.equal(formatPirDelta({ pirDelta: 1.5 }), '+1.50');
   assert.equal(formatPirDelta({ pirDelta: -0.5 }), '-0.50');
   assert.equal(formatPirDelta({}), '-');
+});
+
+test('formatGirDelta renders a signed value and NEW/hyphen the same way as formatPirDelta, reading girDelta', () => {
+  assert.equal(formatGirDelta({ isNew: true }), 'NEW');
+  assert.equal(formatGirDelta({ girDelta: 1.5 }), '+1.50');
+  assert.equal(formatGirDelta({ girDelta: -0.5 }), '-0.50');
+  assert.equal(formatGirDelta({}), '-');
 });
 
 test('formatRelativeTime renders "just now" for anything under a minute old', () => {

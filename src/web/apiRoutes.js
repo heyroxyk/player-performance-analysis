@@ -1,79 +1,15 @@
-// Route handlers for the /api/* surface. Each handler is a thin adapter: validate input
-// (requestOptions.js) -> call the shared business logic (commands.js / snapshotIndex.js) ->
-// shape an HTTP response (httpUtil.js). No scoring, formatting, or filesystem logic lives here.
+// The local control panel's one remaining /api/* route: POST /api/update, the disk capture no
+// static site can perform. Everything else that used to live here (GET /api/leagues,
+// /api/snapshots, /api/rank, /api/export) was a temporary fallback kept only until the static
+// client (src/web/public/app.js computing rankings in-browser via src/browserStore.js /
+// src/browserCommandDeps.js) was proven out -- it now is, so those routes and their supporting
+// modules (requestOptions.js's rank/export parsers, src/web/snapshotIndex.js) were deleted.
+// This handler is a thin adapter: validate input (requestOptions.js) -> call the shared
+// business logic (commands.js) -> shape an HTTP response (httpUtil.js).
 
-import { captureUpdate, getRanking, formatRanking } from '../commands.js';
-import { listSnapshotsForLeague } from './snapshotIndex.js';
-import { parseRankQuery, parseExportQuery, parseSnapshotsQuery, parseUpdateBody } from './requestOptions.js';
-import { sendJson, sendText, readJsonBody, HttpError } from './httpUtil.js';
-
-const LEAGUES = [
-  { id: 0, name: 'SHL' },
-  { id: 1, name: 'SMJHL' },
-];
-
-export function handleLeagues(res) {
-  sendJson(res, 200, { leagues: LEAGUES });
-}
-
-export async function handleSnapshots(url, res, ctx) {
-  const { league } = parseSnapshotsQuery(url.searchParams);
-  const result = await listSnapshotsForLeague({ league }, ctx.snapshotIndexDeps);
-  sendJson(res, 200, result);
-}
-
-export async function handleRank(url, res, ctx) {
-  const args = parseRankQuery(url.searchParams);
-  const { ranked, meta, excluded } = await getRankingOrNotFound(args, ctx.commandsDeps);
-  sendJson(res, 200, { meta, players: ranked, excluded });
-}
-
-const EXPORT_CONTENT_TYPES = {
-  table: 'text/plain; charset=utf-8',
-  json: 'application/json; charset=utf-8',
-  csv: 'text/csv; charset=utf-8',
-};
-const EXPORT_EXTENSIONS = { table: 'txt', json: 'json', csv: 'csv' };
-
-// A capture's own capturedAt/league/season only ever contain digits, hyphens, and colons (an
-// ISO timestamp, and integers), but building a filename from request-influenced data on
-// principle goes through an allowlist rather than trusting that -- a header value assembled
-// from unsanitized input is exactly the shape of a header-injection bug, however unlikely the
-// current inputs make it in practice.
-function sanitizeForFilename(value) {
-  return String(value).replace(/[^A-Za-z0-9._-]/g, '');
-}
-
-export async function handleExport(url, res, ctx) {
-  const args = parseExportQuery(url.searchParams);
-  const { ranked, meta } = await getRankingOrNotFound(args, ctx.commandsDeps);
-  const formatted = formatRanking(ranked, { format: args.format, top: args.top, meta }, ctx.commandsDeps);
-
-  const filename = `pir-league${sanitizeForFilename(meta.league)}-season${sanitizeForFilename(meta.season)}.${EXPORT_EXTENSIONS[args.format]}`;
-
-  sendText(res, 200, formatted, EXPORT_CONTENT_TYPES[args.format], {
-    'Content-Disposition': `attachment; filename="${filename}"`,
-  });
-}
-
-// getRanking tags two distinct failure modes -- `.notFound` (no snapshot captured yet) and
-// `.windowUnavailable` (a requested window can't be honestly built) -- and this translates
-// both into the HttpError shape the top-level request listener knows how to respond to, so
-// every route that reads a ranking gets the same behavior for free. Without the second branch,
-// a window request that can't be satisfied would fall through to the generic 500 handler and
-// get logged as an unexpected bug rather than reported as the client-fixable request it is.
-async function getRankingOrNotFound(args, deps) {
-  try {
-    return await getRanking(args, deps);
-  } catch (error) {
-    if (error.notFound) throw new HttpError(404, error.message, { code: 'NO_SNAPSHOT', cause: error });
-    // 409, matching the existing UPDATE_IN_PROGRESS use of that status: the request itself is
-    // valid, but the server's current state (not enough captures, or too noisy a window) can't
-    // satisfy it right now.
-    if (error.windowUnavailable) throw new HttpError(409, error.message, { code: 'WINDOW_UNAVAILABLE', cause: error });
-    throw error;
-  }
-}
+import { captureUpdate } from '../commands.js';
+import { parseUpdateBody } from './requestOptions.js';
+import { sendJson, readJsonBody, HttpError } from './httpUtil.js';
 
 // Guards against a double-click (or two browser tabs) triggering two captures for the same
 // league+season at once: rotateAndWrite's mkdir -> write sequence isn't safe against

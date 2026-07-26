@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { captureSnapshot, computeMovement, trimPlayerRow, playersFingerprint, STORED_STAT_FIELDS } from '../src/snapshot.js';
-import { makePlayerStatsRow, makePlayerRatingsRow, makeTrimmedPlayerRow, makeSnapshot } from './fixtures.js';
+import { captureSnapshot, computeMovement, trimPlayerRow, snapshotFingerprint, STORED_STAT_FIELDS } from '../src/snapshot.js';
+import { makePlayerStatsRow, makePlayerRatingsRow, makeTrimmedPlayerRow, makeTrimmedGoalieRow, makeSnapshot } from './fixtures.js';
 
 const LEAGUE = 1;
 const SEASON = 89;
@@ -14,11 +14,16 @@ const SEASON = 89;
 function makeFakeDeps({
   statsRows = [makePlayerStatsRow()],
   ratingsRows = [makePlayerRatingsRow()],
+  goalieStatsRows = [],
+  goalieRatingsRows = [],
   portalPlayers = [],
   existingSnapshot = null,
   seasonFinished = false,
 } = {}) {
-  const calls = { fetchPlayerStats: 0, fetchPlayerRatings: 0, fetchPortalPlayersByLeague: 0, writeCapture: [] };
+  const calls = {
+    fetchPlayerStats: 0, fetchPlayerRatings: 0, fetchGoalieStats: 0, fetchGoalieRatings: 0,
+    fetchPortalPlayersByLeague: 0, writeCapture: [],
+  };
 
   const deps = {
     fetchPlayerStats: async () => {
@@ -28,6 +33,14 @@ function makeFakeDeps({
     fetchPlayerRatings: async () => {
       calls.fetchPlayerRatings += 1;
       return ratingsRows;
+    },
+    fetchGoalieStats: async () => {
+      calls.fetchGoalieStats += 1;
+      return goalieStatsRows;
+    },
+    fetchGoalieRatings: async () => {
+      calls.fetchGoalieRatings += 1;
+      return goalieRatingsRows;
     },
     fetchPortalPlayersByLeague: async () => {
       calls.fetchPortalPlayersByLeague += 1;
@@ -205,20 +218,41 @@ test('captureSnapshot treats reordered-but-otherwise-identical player rows as un
   assert.strictEqual(calls.writeCapture.length, 0);
 });
 
-// --- playersFingerprint ------------------------------------------------------
+// --- snapshotFingerprint ------------------------------------------------------
 
-test('playersFingerprint is stable regardless of array order', () => {
-  const a = [makeTrimmedPlayerRow({ id: 1 }), makeTrimmedPlayerRow({ id: 2 })];
-  const b = [makeTrimmedPlayerRow({ id: 2 }), makeTrimmedPlayerRow({ id: 1 })];
+test('snapshotFingerprint is stable regardless of player or goalie array order', () => {
+  const a = makeSnapshot({
+    players: [makeTrimmedPlayerRow({ id: 1 }), makeTrimmedPlayerRow({ id: 2 })],
+    goalies: [makeTrimmedGoalieRow({ id: 10 }), makeTrimmedGoalieRow({ id: 11 })],
+  });
+  const b = makeSnapshot({
+    players: [makeTrimmedPlayerRow({ id: 2 }), makeTrimmedPlayerRow({ id: 1 })],
+    goalies: [makeTrimmedGoalieRow({ id: 11 }), makeTrimmedGoalieRow({ id: 10 })],
+  });
 
-  assert.strictEqual(playersFingerprint(a), playersFingerprint(b));
+  assert.strictEqual(snapshotFingerprint(a), snapshotFingerprint(b));
 });
 
-test('playersFingerprint changes when any player value changes', () => {
-  const a = [makeTrimmedPlayerRow({ id: 1, points: 10 })];
-  const b = [makeTrimmedPlayerRow({ id: 1, points: 11 })];
+test('snapshotFingerprint changes when any player value changes', () => {
+  const a = makeSnapshot({ players: [makeTrimmedPlayerRow({ id: 1, points: 10 })] });
+  const b = makeSnapshot({ players: [makeTrimmedPlayerRow({ id: 1, points: 11 })] });
 
-  assert.notStrictEqual(playersFingerprint(a), playersFingerprint(b));
+  assert.notStrictEqual(snapshotFingerprint(a), snapshotFingerprint(b));
+});
+
+test('snapshotFingerprint changes when any goalie value changes', () => {
+  const a = makeSnapshot({ goalies: [makeTrimmedGoalieRow({ id: 10, saves: 100 })] });
+  const b = makeSnapshot({ goalies: [makeTrimmedGoalieRow({ id: 10, saves: 101 })] });
+
+  assert.notStrictEqual(snapshotFingerprint(a), snapshotFingerprint(b));
+});
+
+test('snapshotFingerprint treats a missing goalies key (a pre-goalie-support capture) identically to an empty goalies array', () => {
+  const players = [makeTrimmedPlayerRow({ id: 1 })];
+  const preGoalieSupport = { league: 1, season: 89, capturedAt: '2026-07-20T12:00:00.000Z', players };
+  const postGoalieSupportEmpty = makeSnapshot({ players, goalies: [] });
+
+  assert.strictEqual(snapshotFingerprint(preGoalieSupport), snapshotFingerprint(postGoalieSupportEmpty));
 });
 
 // --- season resolution -------------------------------------------------------

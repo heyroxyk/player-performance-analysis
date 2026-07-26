@@ -17,13 +17,25 @@ import {
   VALID_STATUSES,
   parseNonNegativeInteger,
 } from './src/commands.js';
+import { getGoalieRanking, formatGoalieRanking } from './src/goalieCommands.js';
 import { defaultDeps } from './src/nodeCommandDeps.js';
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
 // ---------------------------------------------------------------------------
 
-const SUBCOMMANDS = new Set(['update', 'rank']);
+const SUBCOMMANDS = new Set(['update', 'rank', 'grank']);
+
+// Which --flag=value names each subcommand accepts on the command line. Typing a flag that's
+// valid for a DIFFERENT subcommand (e.g. `update --top=5`, or `grank --baseline=position`, which
+// is meaningless for a single-position goalie pool) is a usage error rather than a silently
+// no-op'd flag -- a typo'd or copy-pasted flag is exactly the kind of mistake that should fail
+// loudly, not run "successfully" while quietly ignoring what was actually asked for.
+const FLAGS_BY_SUBCOMMAND = {
+  update: new Set(['league', 'season']),
+  rank: new Set(['league', 'season', 'baseline', 'movement', 'top', 'format', 'out', 'shrink', 'window', 'status']),
+  grank: new Set(['league', 'season', 'movement', 'top', 'format', 'out', 'shrink', 'window', 'status']),
+};
 
 function usageError(message) {
   return new Error(`Usage error: ${message}`);
@@ -60,7 +72,7 @@ function parseIntegerFlag(flag, value) {
 export function parseArgs(argv) {
   const [command, ...flagArgs] = argv;
   if (!SUBCOMMANDS.has(command)) {
-    throw usageError(`unknown command "${command}" (expected "update" or "rank")`);
+    throw usageError(`unknown command "${command}" (expected "update", "rank", or "grank")`);
   }
 
   let league;
@@ -81,14 +93,19 @@ export function parseArgs(argv) {
   let status = 'all';
 
   for (const arg of flagArgs) {
-    if (arg === '--no-movement') {
+    const isMovementFlag = arg === '--no-movement';
+    const parsed = isMovementFlag ? { flag: 'movement', value: undefined } : splitFlag(arg);
+    if (!parsed) throw usageError(`unrecognized argument "${arg}"`);
+    const { flag, value } = parsed;
+
+    if (!FLAGS_BY_SUBCOMMAND[command].has(flag)) {
+      throw usageError(`unrecognized flag "--${flag}" for "${command}"`);
+    }
+
+    if (isMovementFlag) {
       movement = false;
       continue;
     }
-
-    const parsed = splitFlag(arg);
-    if (!parsed) throw usageError(`unrecognized argument "${arg}"`);
-    const { flag, value } = parsed;
 
     switch (flag) {
       case 'league':
@@ -118,6 +135,9 @@ export function parseArgs(argv) {
       case 'status':
         status = value;
         break;
+      // Unreachable given the FLAGS_BY_SUBCOMMAND allowlist check above -- kept so the switch
+      // fails loudly rather than silently if a flag is ever added to the allowlist without a
+      // matching case here.
       default:
         throw usageError(`unrecognized flag "--${flag}"`);
     }
@@ -139,6 +159,14 @@ export function parseArgs(argv) {
   // rather than let it reach findAnchorCapture, where it would read as "no window at all".
   if (windowGames !== undefined && windowGames < 1) {
     throw usageError('--window must be at least 1 game');
+  }
+
+  // grank has no `baseline` concept at all (goalies are a single-position pool -- see
+  // src/goalieCommands.js's header comment), and its --shrink is in SHOTS FACED, not minutes, so
+  // it gets its own field name (shrinkageShots) rather than reusing shrinkageMinutes under a
+  // name that would misdescribe the unit.
+  if (command === 'grank') {
+    return { command, league, season, movement, top, format, out, shrinkageShots: shrink, windowGames, status };
   }
 
   return { command, league, season, baseline, movement, top, format, out, shrinkageMinutes: shrink, windowGames, status };
@@ -176,7 +204,7 @@ async function runUpdate(args, deps) {
     return;
   }
 
-  console.log(`Captured ${result.playerCount} players for league ${result.league} season ${result.season}.`);
+  console.log(`Captured ${result.playerCount} players and ${result.goalieCount} goalies for league ${result.league} season ${result.season}.`);
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +235,33 @@ async function runRank(args, deps) {
 }
 
 // ---------------------------------------------------------------------------
+// grank
+// ---------------------------------------------------------------------------
+
+async function runGrank(args, deps) {
+  const { ranked, meta, excluded } = await getGoalieRanking(args, deps);
+
+  for (const { row, reason } of excluded) {
+    console.error(`Excluded ${row.name} from ranking: ${reason}`);
+  }
+
+  if (meta.window) {
+    for (const warning of meta.window.warnings) {
+      console.error(`Window warning: ${warning}`);
+    }
+  }
+
+  const output = formatGoalieRanking(ranked, { format: args.format, top: args.top, meta }, deps);
+
+  if (args.out) {
+    await deps.writeFile(args.out, output);
+    return;
+  }
+
+  console.log(output);
+}
+
+// ---------------------------------------------------------------------------
 // entry point
 // ---------------------------------------------------------------------------
 
@@ -215,6 +270,8 @@ export async function main(argv, deps = defaultDeps) {
 
   if (args.command === 'update') {
     await runUpdate(args, deps);
+  } else if (args.command === 'grank') {
+    await runGrank(args, deps);
   } else {
     await runRank(args, deps);
   }

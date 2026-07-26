@@ -23,6 +23,7 @@ function makeSnapshot(overrides = {}) {
     season: SEASON,
     capturedAt: '2026-07-20T12:00:00.000Z',
     players: [{ id: 1, name: 'Test Player', position: 'C' }],
+    goalies: [{ id: 5118, name: 'Test Goalie', position: 'G' }],
     ...overrides,
   };
 }
@@ -50,6 +51,20 @@ function makeFakeDeps(overrides = {}) {
     toCsv: trackCalls(() => 'CSV OUTPUT'),
     writeFile: trackCalls(async () => undefined),
     POSITION_GROUPS: { C: 'F', LW: 'F', RW: 'F', LD: 'D', RD: 'D' },
+    // grank deps -- fakes mirroring the skater ones above. findAnchorCapture (declared above)
+    // is shared verbatim between rank and grank, so it is not redeclared here.
+    buildGoalieWindowRows: trackCalls(() => ({ rows: [], dropped: [], summary: {} })),
+    evaluateGoalieWindowQuality: trackCalls(({ anchorReason } = {}) => (
+      anchorReason ? { blockers: [anchorReason], warnings: [] } : { blockers: [], warnings: [] }
+    )),
+    goalieBaseline: trackCalls(() => ({ leagueSavePct: 0.88, replacementSavePct: 0.865 })),
+    adaptiveShrinkageShots: trackCalls(() => ({ shots: 1200, noSignal: false })),
+    filterScoreableGoalieRows: trackCalls((goalies) => ({ usable: goalies, excluded: [] })),
+    computeGoalieImpact: trackCalls((rows) => rows.map((row) => ({ ...row, gir: 12.5, gsar: 6.77 }))),
+    rankByGir: trackCalls((rows) => rows),
+    formatGoalieTable: trackCalls(() => 'GOALIE TABLE OUTPUT'),
+    toGoalieJson: trackCalls(() => 'GOALIE JSON OUTPUT'),
+    toGoalieCsv: trackCalls(() => 'GOALIE CSV OUTPUT'),
     ...overrides,
   };
 }
@@ -472,4 +487,151 @@ test('main rank calls readLatest and readPrevious with only league and season', 
 
   assert.deepEqual(deps.readLatest.calls[0][0], { league: 1, season: 89 });
   assert.deepEqual(deps.readPrevious.calls[0][0], { league: 1, season: 89 });
+});
+
+// ---------------------------------------------------------------------------
+// grank
+// ---------------------------------------------------------------------------
+
+test('parseArgs parses a grank command with every flag set, using shrinkageShots not shrinkageMinutes', () => {
+  const args = parseArgs([
+    'grank',
+    '--league=0',
+    '--season=89',
+    '--no-movement',
+    '--top=10',
+    '--format=json',
+    '--out=goalies.json',
+    '--shrink=900',
+    '--window=12',
+  ]);
+  assert.deepEqual(args, {
+    command: 'grank',
+    league: 0,
+    season: 89,
+    movement: false,
+    top: 10,
+    format: 'json',
+    out: 'goalies.json',
+    shrinkageShots: 900,
+    windowGames: 12,
+    status: 'all',
+  });
+  assert.equal('baseline' in args, false, 'grank has no baseline concept at all');
+});
+
+test('parseArgs rejects --baseline on grank -- meaningless for a single-position goalie pool', () => {
+  assert.throws(
+    () => parseArgs(['grank', '--league=0', '--baseline=position']),
+    /unrecognized flag "--baseline" for "grank"/,
+  );
+});
+
+test('parseArgs rejects --top on update, the same way an out-of-scope flag is rejected on any subcommand', () => {
+  assert.throws(
+    () => parseArgs(['update', '--league=0', '--top=5']),
+    /unrecognized flag "--top" for "update"/,
+  );
+});
+
+test('main grank throws an actionable error and calls no scoring/report deps when no current snapshot exists', async () => {
+  const deps = makeFakeDeps({ readLatest: trackCalls(async () => null) });
+
+  await assert.rejects(
+    () => main(['grank', '--league=0'], deps),
+    /update --league=0/,
+  );
+  assert.equal(deps.computeGoalieImpact.calls.length, 0);
+});
+
+test('main grank throws an actionable error when the latest capture predates goalie support', async () => {
+  const deps = makeFakeDeps({
+    readLatest: trackCalls(async () => ({ league: 0, season: 89, capturedAt: 'x', players: [] })), // no goalies key
+  });
+
+  await assert.rejects(
+    () => main(['grank', '--league=0'], deps),
+    /predates goalie support/,
+  );
+});
+
+test('main grank format=json calls toGoalieJson only', async () => {
+  const deps = makeFakeDeps();
+
+  await withCapturedConsole(() => main(['grank', '--league=0', '--format=json'], deps));
+
+  assert.equal(deps.toGoalieJson.calls.length, 1);
+  assert.equal(deps.toGoalieCsv.calls.length, 0);
+  assert.equal(deps.formatGoalieTable.calls.length, 0);
+});
+
+test('main grank format=csv calls toGoalieCsv only', async () => {
+  const deps = makeFakeDeps();
+
+  await withCapturedConsole(() => main(['grank', '--league=0', '--format=csv'], deps));
+
+  assert.equal(deps.toGoalieCsv.calls.length, 1);
+  assert.equal(deps.toGoalieJson.calls.length, 0);
+});
+
+test('main grank format=table (the default) calls formatGoalieTable only', async () => {
+  const deps = makeFakeDeps();
+
+  await withCapturedConsole(() => main(['grank', '--league=0'], deps));
+
+  assert.equal(deps.formatGoalieTable.calls.length, 1);
+  assert.equal(deps.toGoalieJson.calls.length, 0);
+});
+
+test('main grank writes to --out via deps.writeFile instead of logging to the console', async () => {
+  const deps = makeFakeDeps();
+
+  const { logs } = await withCapturedConsole(() => main(['grank', '--league=0', '--out=goalies.txt'], deps));
+
+  assert.equal(deps.writeFile.calls.length, 1);
+  assert.equal(deps.writeFile.calls[0][0], 'goalies.txt');
+  assert.equal(logs.length, 0);
+});
+
+test('main grank logs each excluded goalie and its reason to console.error', async () => {
+  const deps = makeFakeDeps({
+    filterScoreableGoalieRows: trackCalls((goalies) => ({
+      usable: [],
+      excluded: goalies.map((row) => ({ row, reason: 'no shots faced' })),
+    })),
+  });
+
+  const { errors } = await withCapturedConsole(() => main(['grank', '--league=0'], deps));
+
+  assert.ok(errors.some((line) => line.includes('Test Goalie') && line.includes('no shots faced')));
+});
+
+test('main grank calls computeMovement (tagged girDelta) when movement is enabled and a previous snapshot exists', async () => {
+  const deps = makeFakeDeps({ readPrevious: trackCalls(async () => makeSnapshot()) });
+
+  await withCapturedConsole(() => main(['grank', '--league=0'], deps));
+
+  assert.equal(deps.computeMovement.calls.length, 1);
+  const [, , options] = deps.computeMovement.calls[0];
+  assert.deepEqual(options, { scoreKey: 'gir', deltaKey: 'girDelta' });
+});
+
+test('main grank --window=12 prints window quality warnings to console.error alongside exclusions', async () => {
+  const deps = makeFakeDeps({
+    findAnchorCapture: trackCalls(async () => ({ anchor: makeSnapshot(), reason: null, resolvedGames: 10 })),
+    buildGoalieWindowRows: trackCalls(() => ({
+      rows: [],
+      dropped: [{ row: { name: 'Dropped Goalie' }, reason: 'no shots faced in this window' }],
+      summary: { medianWindowShotsAgainst: 200, goalieCount: 0, droppedCount: 1 },
+    })),
+    evaluateGoalieWindowQuality: trackCalls(() => ({
+      blockers: [],
+      warnings: ['requested a window of ~12 games, but the nearest available anchor resolves to 10'],
+    })),
+  });
+
+  const { errors } = await withCapturedConsole(() => main(['grank', '--league=0', '--window=12'], deps));
+
+  assert.ok(errors.some((line) => line.includes('Dropped Goalie')));
+  assert.ok(errors.some((line) => line.includes('Window warning') && line.includes('resolves to 10')));
 });

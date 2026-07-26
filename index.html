@@ -28,6 +28,12 @@
   <div class="layout">
     <aside class="rail" aria-label="Controls">
       <section class="rail-block">
+        <h2 class="rail-title">Mode</h2>
+        <div id="modeChips" class="chip-group" role="radiogroup" aria-label="Skaters or goalies"></div>
+        <p id="goalieModeNote" class="rail-note hidden">Goalie scoring rests on save percentage alone. GAA, wins and shutouts are shown but not scored: they measure team defence, not goaltending.</p>
+      </section>
+
+      <section class="rail-block">
         <h2 class="rail-title">League</h2>
         <div id="leagueChips" class="chip-group" role="radiogroup" aria-label="League"></div>
       </section>
@@ -36,6 +42,11 @@
         <h2 class="rail-title">Season</h2>
         <select id="seasonSelect" class="select" aria-label="Season"></select>
         <p id="seasonNote" class="rail-note"></p>
+      </section>
+
+      <section class="rail-block">
+        <button id="liveRefreshButton" type="button" class="btn btn-ghost" title="Fetch this league's current-season stats straight from the league API, live in your browser. Nothing is saved -- reload the page to go back to the last saved capture.">Live Refresh (optional)</button>
+        <p id="liveRefreshStatus" class="rail-note" aria-live="polite"></p>
       </section>
 
       <section class="rail-block">
@@ -48,7 +59,7 @@
         </div>
       </section>
 
-      <section class="rail-block">
+      <section id="baselineBlock" class="rail-block">
         <h2 class="rail-title">Baseline</h2>
         <div id="baselineChips" class="chip-group" role="radiogroup" aria-label="Baseline"></div>
       </section>
@@ -83,14 +94,18 @@
       </section>
 
       <section class="rail-block">
-        <h2 class="rail-title">Shrinkage <span class="mono dim">(min)</span></h2>
-        <input id="shrinkInput" class="text-input" type="text" inputmode="numeric" value="" placeholder="auto" aria-label="Shrinkage constant in minutes" />
-        <p class="rail-note">Pulls small-sample rates toward the league mean, scaled to sample depth. Blank = adaptive (recommended); 0 disables it entirely.</p>
+        <h2 class="rail-title">Shrinkage <span id="shrinkageUnitLabel" class="mono dim">(min)</span></h2>
+        <input id="shrinkInput" class="text-input" type="text" inputmode="numeric" value="" placeholder="auto" aria-label="Shrinkage constant" />
+        <p id="shrinkageNote" class="rail-note">Pulls small-sample rates toward the league mean, scaled to sample depth. Blank = adaptive (recommended); 0 disables it entirely.</p>
       </section>
     </aside>
 
     <main class="canvas">
       <div id="metaStrip" class="meta-strip mono"></div>
+
+      <div id="noSignalBanner" class="error-banner hidden" role="alert">
+        <span>No goalie talent spread is detectable above binomial luck in this population yet -- GIR ranks here are close to arbitrary. GSAR remains a valid record of what actually happened.</span>
+      </div>
 
       <div id="excludedBanner" class="excluded-banner hidden">
         <button id="excludedToggle" type="button" class="excluded-summary"></button>

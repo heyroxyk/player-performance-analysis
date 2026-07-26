@@ -27,6 +27,16 @@ export function formatPirDelta(row) {
   return `${sign}${row.pirDelta.toFixed(2)}`;
 }
 
+// The goalie analogue of formatPirDelta, reading row.girDelta instead of row.pirDelta (see
+// src/pir/movement.js's scoreKey/deltaKey options) -- everything else about the formatting
+// (NEW marker, sign, 2 decimals) is identical.
+export function formatGirDelta(row) {
+  if (row.isNew) return 'NEW';
+  if (typeof row.girDelta !== 'number') return '-';
+  const sign = row.girDelta > 0 ? '+' : '';
+  return `${sign}${row.girDelta.toFixed(2)}`;
+}
+
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;

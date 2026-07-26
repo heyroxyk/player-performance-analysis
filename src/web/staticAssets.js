@@ -20,6 +20,7 @@ export const STATIC_ASSETS = [
   ['/src/web/public/format.js', 'src/web/public/format.js'],
   ['/src/web/public/styles.css', 'src/web/public/styles.css'],
   ['/src/commands.js', 'src/commands.js'],
+  ['/src/goalieCommands.js', 'src/goalieCommands.js'],
   ['/src/median.js', 'src/median.js'],
   ['/src/browserStore.js', 'src/browserStore.js'],
   ['/src/browserCommandDeps.js', 'src/browserCommandDeps.js'],
@@ -35,9 +36,14 @@ export const STATIC_ASSETS = [
   ['/src/pir/shrink.js', 'src/pir/shrink.js'],
   ['/src/pir/rate60.js', 'src/pir/rate60.js'],
   ['/src/pir/movement.js', 'src/pir/movement.js'],
+  ['/src/pir/goalieComponents.js', 'src/pir/goalieComponents.js'],
+  ['/src/pir/goalieEngine.js', 'src/pir/goalieEngine.js'],
+  ['/src/pir/goalieWindow.js', 'src/pir/goalieWindow.js'],
   ['/src/report/table.js', 'src/report/table.js'],
   ['/src/report/jsonWriter.js', 'src/report/jsonWriter.js'],
   ['/src/report/csvWriter.js', 'src/report/csvWriter.js'],
+  ['/src/report/goalieTable.js', 'src/report/goalieTable.js'],
+  ['/src/report/goalieCsvWriter.js', 'src/report/goalieCsvWriter.js'],
 ];
 
 // Content-Type by extension -- the same three types src/web/server.js's old literal map used.

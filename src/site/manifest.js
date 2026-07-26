@@ -1,8 +1,7 @@
 // Builds the browser-facing capture index (data/index.json) that src/browserStore.js reads
 // instead of listing a filesystem directly. Built entirely on src/store.js's already
-// corruption-safe readers (listSeasons/listCaptures/readCapture) -- the same pattern
-// src/web/snapshotIndex.js already uses for the local panel's /api/snapshots endpoint -- so this
-// manifest can never disagree with the Node store about what counts as a valid capture.
+// corruption-safe readers (listSeasons/listCaptures/readCapture), so this manifest can never
+// disagree with the Node store about what counts as a valid capture.
 //
 // Two consumers build this: scripts/buildSite.js runs it once at Pages-deploy build time, and
 // src/web/dataRoutes.js runs it live on every local dev-server request to /data/index.json (see
@@ -24,7 +23,10 @@ export const defaultDeps = {
   now: () => new Date().toISOString(),
 };
 
-export const MANIFEST_SCHEMA_VERSION = 1;
+// Bumped from 1 to 2 when goalieCount was added to each capture entry -- a v1 manifest (or a
+// consumer reading a v1-shaped entry) simply has no goalieCount field; src/browserStore.js
+// treats that as `?? 0` rather than requiring every consumer to check the schema version itself.
+export const MANIFEST_SCHEMA_VERSION = 2;
 
 /**
  * @param {{
@@ -41,7 +43,7 @@ export const MANIFEST_SCHEMA_VERSION = 1;
  * @param {typeof defaultDeps} deps
  * @returns {Promise<object>} `{schemaVersion, generatedAt, dataDir, localCapture, leagues: [
  *   {league, seasons: [{season, corruptCount, captures: [
- *     {file, capturedAt, medianGamesPlayed, playerCount}, ...   // newest-first
+ *     {file, capturedAt, medianGamesPlayed, playerCount, goalieCount}, ...   // newest-first
  *   ]}, ...]}   // newest-season-first
  * ]}`. An empty or nonexistent data directory yields `leagues: [{league, seasons: []}, ...]`
  * rather than throwing -- that IS the state of a fresh Pages deploy before any capture has run,
@@ -72,6 +74,9 @@ export async function buildManifest({ leagues, dataDirUrl, dataDir = null, local
           capturedAt: snapshot.capturedAt,
           medianGamesPlayed: medianGamesPlayed(snapshot),
           playerCount: snapshot.players.length,
+          // `?? []` covers a capture written before goalie support existed at all (no `goalies`
+          // key), so an old capture reports goalieCount: 0 rather than throwing here.
+          goalieCount: (snapshot.goalies ?? []).length,
         });
       }
 
