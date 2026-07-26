@@ -10,36 +10,41 @@ function portalPlayer(overrides = {}) {
   return { pid: 100, name: 'Test Player', status: 'active', ...overrides };
 }
 
-test('joinPlayerStatusByName attaches the Portal status for an exact single name match', () => {
+test('joinPlayerStatusByName attaches the Portal status AND portalId for an exact single name match', () => {
   const players = [player({ name: 'Winston Coles' })];
   const portalPlayers = [portalPlayer({ pid: 2471, name: 'Winston Coles', status: 'active' })];
 
   const result = joinPlayerStatusByName(players, portalPlayers);
 
   assert.equal(result[0].status, 'active');
+  assert.equal(result[0].portalId, 2471);
 });
 
-test('joinPlayerStatusByName resolves to unknown when no Portal row matches the name at all', () => {
+test('joinPlayerStatusByName resolves to unknown status and a null portalId when no Portal row matches the name at all', () => {
   const players = [player({ name: 'Nobody Here' })];
   const portalPlayers = [portalPlayer({ name: 'Someone Else' })];
 
   const result = joinPlayerStatusByName(players, portalPlayers);
 
   assert.equal(result[0].status, UNKNOWN_STATUS);
+  assert.equal(result[0].portalId, null);
 });
 
-test('joinPlayerStatusByName resolves to unknown when the Portal has no rows at all', () => {
+test('joinPlayerStatusByName resolves to unknown status and a null portalId when the Portal has no rows at all', () => {
   const players = [player({ name: 'Anyone' })];
 
   const result = joinPlayerStatusByName(players, []);
 
   assert.equal(result[0].status, UNKNOWN_STATUS);
+  assert.equal(result[0].portalId, null);
 });
 
-test('joinPlayerStatusByName resolves an ambiguous multi-match to unknown, without throwing or guessing', () => {
+test('joinPlayerStatusByName resolves an ambiguous multi-match to unknown status and a null portalId, without throwing or guessing', () => {
   // Two different Portal players (different pid, different status) that happen to share a
   // name -- exactly the scenario the README calls out: a name-based join across two
-  // independently-run systems can collide, and this must never silently pick either one.
+  // independently-run systems can collide, and this must never silently pick either one, for
+  // portalId any more than for status -- picking either pid would link to the WRONG player's
+  // Portal profile.
   const players = [player({ name: 'John Smith' })];
   const portalPlayers = [
     portalPlayer({ pid: 1, name: 'John Smith', status: 'active' }),
@@ -49,6 +54,7 @@ test('joinPlayerStatusByName resolves an ambiguous multi-match to unknown, witho
   assert.doesNotThrow(() => joinPlayerStatusByName(players, portalPlayers));
   const result = joinPlayerStatusByName(players, portalPlayers);
   assert.equal(result[0].status, UNKNOWN_STATUS);
+  assert.equal(result[0].portalId, null);
 });
 
 test('joinPlayerStatusByName resolves three-or-more same-named Portal rows to unknown as well', () => {
@@ -79,8 +85,11 @@ test('joinPlayerStatusByName joins each player in a mixed batch independently: m
   const result = joinPlayerStatusByName(players, portalPlayers);
 
   assert.equal(result.find((p) => p.id === 1).status, 'active');
+  assert.equal(result.find((p) => p.id === 1).portalId, 10);
   assert.equal(result.find((p) => p.id === 2).status, UNKNOWN_STATUS);
+  assert.equal(result.find((p) => p.id === 2).portalId, null);
   assert.equal(result.find((p) => p.id === 3).status, UNKNOWN_STATUS);
+  assert.equal(result.find((p) => p.id === 3).portalId, null);
 });
 
 test('joinPlayerStatusByName carries every Portal status enum value through untouched', () => {

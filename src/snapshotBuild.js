@@ -162,11 +162,12 @@ export async function buildSnapshot({ league, season }, deps = defaultBuildDeps)
   const trimmedPlayers = statsRows.map((row) => trimPlayerRow(row, appliedTpeById.get(row.id) ?? null));
 
   // portalResult.portalPlayers is null when the league is out of Portal's scope or the fetch
-  // failed (see fetchPortalPlayersForLeague above) -- either way, every player's status falls
-  // back to UNKNOWN_STATUS rather than joining against data we don't have.
+  // failed (see fetchPortalPlayersForLeague above) -- either way, every player's status (and
+  // portalId, used to link to a player's Portal profile page) falls back to UNKNOWN_STATUS/null
+  // rather than joining against data we don't have.
   const players = portalResult.portalPlayers
     ? joinPlayerStatusByName(trimmedPlayers, portalResult.portalPlayers)
-    : trimmedPlayers.map((player) => ({ ...player, status: UNKNOWN_STATUS }));
+    : trimmedPlayers.map((player) => ({ ...player, status: UNKNOWN_STATUS, portalId: null }));
 
   const snapshot = { league, season: resolvedSeason, capturedAt: new Date().toISOString(), players };
   return { snapshot, warning: portalResult.warning };
