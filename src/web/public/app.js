@@ -399,6 +399,13 @@ async function runCapture(season) {
       el.captureStatus.textContent += ` ${result.warning}`;
     }
     state.season = result.season;
+    // The manifest is cached after its first load (see src/browserStore.js) so repeat page
+    // interactions don't refetch it -- but that means a just-written local capture would
+    // otherwise stay invisible until a full page reload, since loadSnapshots/loadRanking below
+    // both read through that same cached manifest. Force a reload here specifically because
+    // THIS caller (uniquely, among everything that reads the store) knows the underlying data
+    // has actually changed.
+    await store.reloadManifest();
     await loadSnapshots();
     await loadRanking();
   } catch (error) {
@@ -719,6 +726,14 @@ function buildDetailGrid(row) {
   return grid;
 }
 
+// row.portalId is the Portal's own `pid` (see src/playerStatus.js) -- an entirely different,
+// unrelated numeric ID space from this row's own `id` (the Index API's), so it's never safe to
+// build this URL from anything but portalId itself. null/undefined (an unmatched or ambiguous
+// name join, a capture predating this feature, or a league the Portal join skips entirely --
+// IIHF/WJC) means there is no real profile to link to, handled below by leaving the name as
+// plain text rather than a link to a guessed or wrong URL.
+const PORTAL_PLAYER_URL_BASE = 'https://portal.simulationhockey.com/player/';
+
 function renderRow(row, columns) {
   const tr = document.createElement('tr');
   tr.className = 'data-row';
@@ -729,7 +744,6 @@ function renderRow(row, columns) {
     // state.rankById's comment for why the row objects no longer carry a mutated `rank` field.
     rank: String(state.rankById.get(row.id) ?? ''),
     mvmt: formatRankMovement(row),
-    name: row.name,
     position: row.position,
     team: row.team,
     // 'unknown' for a missing status, matching src/report/table.js's identical fallback --
@@ -748,9 +762,31 @@ function renderRow(row, columns) {
     const td = document.createElement('td');
     if (column.align === 'right') td.classList.add('num');
     if (column.key === 'rank') td.classList.add('rank-cell');
-    if (column.key === 'name') td.classList.add('player-cell');
     if (column.key === 'pir') td.classList.add('pir-cell');
     if (column.key === 'mvmt') td.classList.add(movementClass(row));
+
+    if (column.key === 'name') {
+      td.classList.add('player-cell');
+      if (row.portalId != null) {
+        const link = document.createElement('a');
+        link.className = 'player-link';
+        link.href = `${PORTAL_PLAYER_URL_BASE}${row.portalId}`;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.title = `Open ${row.name}'s Portal profile`;
+        link.textContent = row.name;
+        // Without this, the click would also bubble to the row's own listener below and
+        // toggle the detail row open/closed at the same moment a new tab opens -- confusing
+        // and unnecessary, since opening the profile is a complete action on its own.
+        link.addEventListener('click', (event) => event.stopPropagation());
+        td.appendChild(link);
+      } else {
+        td.textContent = row.name;
+      }
+      tr.appendChild(td);
+      continue;
+    }
+
     td.textContent = cells[column.key];
     tr.appendChild(td);
   }

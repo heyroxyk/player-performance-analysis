@@ -123,6 +123,13 @@ A `Status` column appears in the table/CSV output only when the leaderboard actu
 more than one distinct status -- a fully-filtered view (`--status=active`, say) would otherwise
 show the same word on every row, which is clutter rather than information.
 
+**Portal profile links:** the same name-based join also carries the Portal's own `pid` through
+as `portalId` on every player row, under the identical ambiguity rule as `status` (null unless
+the name resolved to exactly one Portal row). The web panel uses it to link a player's name
+directly to their Portal profile (`https://portal.simulationhockey.com/player/<pid>`) -- an
+unmatched, ambiguous, or IIHF/WJC player (or a capture taken before this field existed) simply
+renders as plain, unlinked text rather than a guessed or broken URL.
+
 ## Data store
 
 Every capture is self-describing and additive — nothing is ever silently overwritten:

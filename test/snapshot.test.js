@@ -111,9 +111,10 @@ test('captureSnapshot calls writeCapture exactly once with the trimmed snapshot'
 
   assert.strictEqual(calls.writeCapture.length, 1);
   assert.deepStrictEqual(calls.writeCapture[0], { league: LEAGUE, season: SEASON, snapshot });
-  // status: 'unknown' -- makeFakeDeps' default empty portalPlayers means no Portal row ever
-  // matches this fixture's name, so the join in src/playerStatus.js falls back to unknown.
-  assert.deepStrictEqual(snapshot.players[0], { ...makeTrimmedPlayerRow(), status: 'unknown' });
+  // status: 'unknown', portalId: null -- makeFakeDeps' default empty portalPlayers means no
+  // Portal row ever matches this fixture's name, so the join in src/playerStatus.js falls back
+  // to both defaults.
+  assert.deepStrictEqual(snapshot.players[0], { ...makeTrimmedPlayerRow(), status: 'unknown', portalId: null });
 });
 
 test('captureSnapshot skips entirely (no network calls) when the season is finished and already captured', async () => {
@@ -156,9 +157,10 @@ test('captureSnapshot does not skip when no season is given, even if isSeasonFin
 // zero-game-span candidate anchor a window request could pick.
 
 test('captureSnapshot skips writing (but never skips the network call) when the new capture is identical to the existing one', async () => {
-  // status: 'unknown' on the existing row too -- it must match what a fresh capture will
-  // compute (makeFakeDeps' default empty portalPlayers) for the fingerprints to agree at all.
-  const existingSnapshot = makeSnapshot({ players: [{ ...makeTrimmedPlayerRow(), status: 'unknown' }] });
+  // status: 'unknown', portalId: null on the existing row too -- it must match what a fresh
+  // capture will compute (makeFakeDeps' default empty portalPlayers) for the fingerprints to
+  // agree at all.
+  const existingSnapshot = makeSnapshot({ players: [{ ...makeTrimmedPlayerRow(), status: 'unknown', portalId: null }] });
   const { deps, calls } = makeFakeDeps({ existingSnapshot });
 
   const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
@@ -187,11 +189,11 @@ test('captureSnapshot treats reordered-but-otherwise-identical player rows as un
   const ratingsRows = [makePlayerRatingsRow({ id: 1 }), makePlayerRatingsRow({ id: 2 })];
   const existingSnapshot = makeSnapshot({
     // Same two players as the fetch will produce, but REVERSED -- order must not matter.
-    // status: 'unknown' on both -- must match what a fresh capture computes (makeFakeDeps'
-    // default empty portalPlayers) for the fingerprints to agree.
+    // status: 'unknown', portalId: null on both -- must match what a fresh capture computes
+    // (makeFakeDeps' default empty portalPlayers) for the fingerprints to agree.
     players: [
-      { ...trimPlayerRow(makePlayerStatsRow({ id: 2 }), 350), status: 'unknown' },
-      { ...trimPlayerRow(makePlayerStatsRow({ id: 1 }), 350), status: 'unknown' },
+      { ...trimPlayerRow(makePlayerStatsRow({ id: 2 }), 350), status: 'unknown', portalId: null },
+      { ...trimPlayerRow(makePlayerStatsRow({ id: 1 }), 350), status: 'unknown', portalId: null },
     ],
   });
   const { deps, calls } = makeFakeDeps({ statsRows, ratingsRows, existingSnapshot });
