@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   fetchPlayerStats,
   fetchPlayerRatings,
+  fetchGoalieStats,
+  fetchGoalieRatings,
   fetchStandings,
   fetchTeams,
   fetchSchedule,
@@ -94,6 +96,64 @@ test('fetchPlayerRatings includes the season param only when provided', async ()
     },
   );
   assert.match(requestedUrl, /\/api\/v1\/players\/ratings\?league=0&season=89$/);
+});
+
+test('fetchGoalieStats requests the goalies/stats endpoint with the given league and no season by default', async () => {
+  let requestedUrl;
+  await withFakeFetch(
+    async (url) => {
+      requestedUrl = url;
+      return jsonResponse(200, []);
+    },
+    async () => {
+      await fetchGoalieStats({ league: 0 });
+    },
+  );
+  assert.match(requestedUrl, /\/api\/v1\/goalies\/stats\?league=0$/);
+  assert.ok(!requestedUrl.includes('season='));
+});
+
+test('fetchGoalieStats includes the season param only when provided', async () => {
+  let requestedUrl;
+  await withFakeFetch(
+    async (url) => {
+      requestedUrl = url;
+      return jsonResponse(200, []);
+    },
+    async () => {
+      await fetchGoalieStats({ league: 0, season: 89 });
+    },
+  );
+  assert.match(requestedUrl, /\/api\/v1\/goalies\/stats\?league=0&season=89$/);
+});
+
+test('fetchGoalieRatings requests the goalies/ratings endpoint with the given league and no season by default', async () => {
+  let requestedUrl;
+  await withFakeFetch(
+    async (url) => {
+      requestedUrl = url;
+      return jsonResponse(200, []);
+    },
+    async () => {
+      await fetchGoalieRatings({ league: 1 });
+    },
+  );
+  assert.match(requestedUrl, /\/api\/v1\/goalies\/ratings\?league=1$/);
+  assert.ok(!requestedUrl.includes('season='));
+});
+
+test('fetchGoalieRatings includes the season param only when provided', async () => {
+  let requestedUrl;
+  await withFakeFetch(
+    async (url) => {
+      requestedUrl = url;
+      return jsonResponse(200, []);
+    },
+    async () => {
+      await fetchGoalieRatings({ league: 1, season: 89 });
+    },
+  );
+  assert.match(requestedUrl, /\/api\/v1\/goalies\/ratings\?league=1&season=89$/);
 });
 
 test('fetchStandings requests the standings endpoint with league and season', async () => {

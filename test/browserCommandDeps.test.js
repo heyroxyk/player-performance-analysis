@@ -27,7 +27,14 @@ test('createBrowserCommandDeps wires the pure compute deps to the identical func
   // Every pure-compute key must be THE SAME function reference in both wirings -- both import
   // it from the same src/pir/src/report modules rather than each reimplementing it, which is
   // what guarantees local and hosted score things identically by construction, not by convention.
-  for (const key of ['buildWindowRows', 'evaluateWindowQuality', 'adaptiveShrinkageMinutes', 'filterScoreableRows', 'computePir', 'rankByPir', 'computeMovement', 'formatTable', 'toJson', 'toCsv', 'POSITION_GROUPS']) {
+  const pureComputeKeys = [
+    'buildWindowRows', 'evaluateWindowQuality', 'adaptiveShrinkageMinutes', 'filterScoreableRows',
+    'computePir', 'rankByPir', 'computeMovement', 'formatTable', 'toJson', 'toCsv', 'POSITION_GROUPS',
+    'filterScoreableGoalieRows', 'goalieBaseline', 'adaptiveShrinkageShots', 'computeGoalieImpact',
+    'rankByGir', 'buildGoalieWindowRows', 'evaluateGoalieWindowQuality', 'formatGoalieTable',
+    'toGoalieJson', 'toGoalieCsv',
+  ];
+  for (const key of pureComputeKeys) {
     assert.strictEqual(browserDeps[key], nodeDefaultDeps[key], `${key} should be the identical reference in both wirings`);
   }
 });
@@ -36,6 +43,8 @@ test('createBrowserCommandDeps\' captureSnapshot never reports skipped, since th
   const buildDeps = {
     fetchPlayerStats: async () => [makePlayerStatsRow()],
     fetchPlayerRatings: async () => [makePlayerRatingsRow()],
+    fetchGoalieStats: async () => [],
+    fetchGoalieRatings: async () => [],
     fetchPortalPlayersByLeague: async () => ({ rows: [], truncated: false }),
   };
   const browserDeps = createBrowserCommandDeps({ store: makeStore(), buildDeps });

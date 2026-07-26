@@ -125,7 +125,7 @@ export function buildUpdateSuggestion({ league, season }) {
  *   skipped: boolean,
  *   reason?: 'season-finished' | 'unchanged',
  *   warning?: string,
- *   league: number, season: number, playerCount: number, capturedAt: string,
+ *   league: number, season: number, playerCount: number, goalieCount: number, capturedAt: string,
  * }>}
  */
 export async function captureUpdate({ league, season }, deps) {
@@ -144,6 +144,9 @@ export async function captureUpdate({ league, season }, deps) {
     league,
     season: snapshot.season,
     playerCount: snapshot.players.length,
+    // `?? 0` covers the "season-finished" or "unchanged" skip paths returning an existing,
+    // on-disk snapshot captured before goalie support existed at all (no `goalies` array).
+    goalieCount: snapshot.goalies?.length ?? 0,
     capturedAt: snapshot.capturedAt,
   };
 }
@@ -178,11 +181,14 @@ function scoreSnapshotPlayers(players, { groupBy, shrinkageMinutes, deps }) {
 // not-provably-active, never silently folded into "active" by default. "all" (the default)
 // applies no filter at all.
 /**
+ * Exported (not just used internally by buildRanking) so src/goalieCommands.js can reuse the
+ * identical status-filtering rule for goalies -- the logic is entirely generic over `row.status`
+ * and has no skater-specific assumption in it.
  * @param {Array<object>} players
  * @param {'active' | 'inactive' | 'all'} status
  * @returns {{usable: Array<object>, excluded: Array<{row: object, reason: string}>}}
  */
-function filterByPlayerStatus(players, status) {
+export function filterByPlayerStatus(players, status) {
   if (status === 'all') return { usable: players, excluded: [] };
 
   const usable = [];
@@ -221,12 +227,17 @@ function resolveShrinkageMinutes(shrinkageMinutes, rows, deps) {
 // just ~1 day older under a daily schedule) is the wrong comparison point regardless: a window
 // against one ending a day earlier shares nearly all its data, so every delta would read near
 // zero -- which looks like real stability rather than the absence of a real comparison.
-const WINDOW_MOVEMENT_DISABLED_REASON =
+// Exported so src/goalieCommands.js's window branch reports the identical reason -- the
+// rationale (readPrevious being the wrong comparison point in window mode) has nothing
+// skater-specific about it.
+export const WINDOW_MOVEMENT_DISABLED_REASON =
   'Movement is not available in window mode: comparing against the immediately preceding ' +
   'capture (rather than a prior window of the same length) would show near-zero deltas that ' +
   'look like real stability but are really just measuring nearly the same games twice.';
 
-function throwWindowUnavailable({ league, season, windowGames, blockers }) {
+// Exported so src/goalieCommands.js's window branch throws the identically-shaped, identically
+// tagged (.windowUnavailable) error -- the message format has no skater-specific assumption.
+export function throwWindowUnavailable({ league, season, windowGames, blockers }) {
   const error = new Error(
     `Cannot build a ~${windowGames}-game window for league ${league}, season ${season}: ` +
     `${blockers.join('; ')}. Try a smaller --window, or capture more data over time.`
@@ -355,13 +366,14 @@ export function formatRanking(ranked, { format, top, meta }, deps) {
 /**
  * Loads the current snapshot, scores it (season-to-date or a rolling window, with movement
  * when requested and applicable), and returns the ranked rows plus metadata and exclusions --
- * the full compute pipeline shared by the CLI's `rank` command and the web control panel's
- * /api/rank routes. Callers that need the CLI/export text form compose formatRanking on top of
- * the result themselves; getRanking never formats, so a caller that only wants structured data
- * never pays for string formatting it doesn't need. Throws tagged `.notFound` when no snapshot
- * has been captured yet, or tagged `.windowUnavailable` when a requested window can't be
- * honestly built (no anchor, or one too noisy to trust) -- rather than silently falling back to
- * season-to-date, which would answer a different question than the one asked with no warning.
+ * the full compute pipeline shared by the CLI's `rank` command and the browser control panel's
+ * in-browser ranking (src/web/public/app.js). Callers that need the CLI/export text form
+ * compose formatRanking on top of the result themselves; getRanking never formats, so a caller
+ * that only wants structured data never pays for string formatting it doesn't need. Throws
+ * tagged `.notFound` when no snapshot has been captured yet, or tagged `.windowUnavailable`
+ * when a requested window can't be honestly built (no anchor, or one too noisy to trust) --
+ * rather than silently falling back to season-to-date, which would answer a different question
+ * than the one asked with no warning.
  * @param {{
  *   league: number, season?: number, baseline: string, movement: boolean,
  *   shrinkageMinutes?: number, windowGames?: number, status?: 'active' | 'inactive' | 'all',

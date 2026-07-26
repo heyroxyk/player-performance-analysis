@@ -126,9 +126,9 @@ export function createBrowserStore({ baseUrl, fetchImpl = globalThis.fetch, live
   }
 
   /**
-   * Mirrors src/web/snapshotIndex.js's listSnapshotsForLeague exactly (same shape, same
-   * newest-season-first ordering), derived entirely from the already-loaded manifest with ZERO
-   * additional fetches -- capturedAt/playerCount are already in the manifest per capture, so
+   * Lists every season captured for a league, newest season first, with the latest and previous
+   * capture's metadata for each -- derived entirely from the already-loaded manifest with ZERO
+   * additional fetches, since capturedAt/playerCount are already in the manifest per capture, so
    * summarizing a season never needs to read the capture file itself.
    * @param {{league: number}} params
    */
@@ -143,11 +143,13 @@ export function createBrowserStore({ baseUrl, fetchImpl = globalThis.fetch, live
       seasons: seasons.map((entry) => ({
         season: entry.season,
         captureCount: entry.captures.length,
+        // `goalieCount ?? 0` covers a manifest built before goalieCount existed (schema v1) --
+        // see src/site/manifest.js's MANIFEST_SCHEMA_VERSION history.
         latest: entry.captures[0]
-          ? { season: entry.season, capturedAt: entry.captures[0].capturedAt, playerCount: entry.captures[0].playerCount }
+          ? { season: entry.season, capturedAt: entry.captures[0].capturedAt, playerCount: entry.captures[0].playerCount, goalieCount: entry.captures[0].goalieCount ?? 0 }
           : null,
         previous: entry.captures[1]
-          ? { season: entry.season, capturedAt: entry.captures[1].capturedAt, playerCount: entry.captures[1].playerCount }
+          ? { season: entry.season, capturedAt: entry.captures[1].capturedAt, playerCount: entry.captures[1].playerCount, goalieCount: entry.captures[1].goalieCount ?? 0 }
           : null,
         // Node's `corrupt` means "a capture file exists but the NEWEST one fails to parse" --
         // unreachable here by construction, since the manifest build already parsed every

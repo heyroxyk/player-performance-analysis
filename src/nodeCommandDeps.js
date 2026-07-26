@@ -13,12 +13,22 @@ import { filterScoreableRows, computePir, rankByPir, adaptiveShrinkageMinutes } 
 import { buildWindowRows, evaluateWindowQuality } from './pir/window.js';
 import { POSITION_GROUPS } from './pir/components.js';
 import { formatTable } from './report/table.js';
-import { toJson } from './report/jsonWriter.js';
+import { toJson, toGoalieJson } from './report/jsonWriter.js';
 import { toCsv } from './report/csvWriter.js';
+import {
+  filterScoreableGoalieRows, goalieBaseline, adaptiveShrinkageShots, computeGoalieImpact, rankByGir,
+} from './pir/goalieEngine.js';
+import { buildGoalieWindowRows, evaluateGoalieWindowQuality } from './pir/goalieWindow.js';
+import { formatGoalieTable } from './report/goalieTable.js';
+import { toGoalieCsv } from './report/goalieCsvWriter.js';
 
 // Real implementations wired together for production (CLI + local web server) use. Every
 // function below arrives through this object rather than a direct import, so tests can
-// substitute plain fake functions with no mocking library.
+// substitute plain fake functions with no mocking library. captureSnapshot/readLatest/
+// readPrevious/findAnchorCapture are shared verbatim between the skater (src/commands.js) and
+// goalie (src/goalieCommands.js) halves of this object -- a capture file holds both `players`
+// and `goalies` together (see src/snapshotBuild.js), so there is only ever one capture pipeline
+// to wire up, not two.
 export const defaultDeps = {
   captureSnapshot,
   readLatest,
@@ -36,4 +46,14 @@ export const defaultDeps = {
   toCsv,
   writeFile,
   POSITION_GROUPS,
+  filterScoreableGoalieRows,
+  goalieBaseline,
+  adaptiveShrinkageShots,
+  computeGoalieImpact,
+  rankByGir,
+  buildGoalieWindowRows,
+  evaluateGoalieWindowQuality,
+  formatGoalieTable,
+  toGoalieJson,
+  toGoalieCsv,
 };

@@ -133,9 +133,9 @@ export async function readCapture(filePath) {
  * Lists every season number captured for a league, by reading the league directory rather
  * than trusting any external index -- a directory is only ever treated as a season bucket
  * when its name is exactly `season-<digits>`, so a stray or malformed directory is silently
- * skipped rather than crashing season resolution. Exported for the web control panel's
- * "what's on disk" view (src/web/snapshotIndex.js), which needs to enumerate seasons before it
- * can list captures within each one.
+ * skipped rather than crashing season resolution. Exported for src/site/manifest.js's
+ * browser-facing capture index, which needs to enumerate seasons before it can list captures
+ * within each one.
  * @param {{league: number|string}} params
  * @param {string|URL} [dataDirUrl]
  * @returns {Promise<number[]>}

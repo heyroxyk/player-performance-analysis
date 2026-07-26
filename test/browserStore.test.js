@@ -40,7 +40,7 @@ function makeFakeFetch({ manifest, captures = {} }) {
   return { fetchImpl, calls };
 }
 
-test('listSnapshotsForLeague matches src/web/snapshotIndex.js\'s shape with zero capture fetches', async () => {
+test('listSnapshotsForLeague summarizes every season with zero capture fetches', async () => {
   const manifest = makeManifest();
   const { fetchImpl, calls } = makeFakeFetch({ manifest, captures: {} });
   const store = createBrowserStore({ baseUrl: BASE_URL, fetchImpl });
@@ -52,11 +52,29 @@ test('listSnapshotsForLeague matches src/web/snapshotIndex.js\'s shape with zero
   assert.strictEqual(result.seasons.length, 1);
   assert.strictEqual(result.seasons[0].season, 89);
   assert.strictEqual(result.seasons[0].captureCount, 3);
-  assert.deepStrictEqual(result.seasons[0].latest, { season: 89, capturedAt: '2026-07-20T12:00:00.000Z', playerCount: 2 });
-  assert.deepStrictEqual(result.seasons[0].previous, { season: 89, capturedAt: '2026-07-10T12:00:00.000Z', playerCount: 2 });
+  // goalieCount: 0 here because the manifest fixture's captures carry no goalieCount field at
+  // all (a schema-v1-shaped manifest) -- see the dedicated goalieCount test below for the
+  // schema-v2 case where it's actually present and non-zero.
+  assert.deepStrictEqual(result.seasons[0].latest, { season: 89, capturedAt: '2026-07-20T12:00:00.000Z', playerCount: 2, goalieCount: 0 });
+  assert.deepStrictEqual(result.seasons[0].previous, { season: 89, capturedAt: '2026-07-10T12:00:00.000Z', playerCount: 2, goalieCount: 0 });
   assert.strictEqual(result.seasons[0].corrupt, false);
   assert.strictEqual(calls.manifest, 1);
   assert.strictEqual(calls.byKey.size, 0);
+});
+
+test('listSnapshotsForLeague passes goalieCount through from a schema-v2 manifest entry', async () => {
+  const manifest = makeManifest({
+    seasons: [{
+      season: 89, corruptCount: 0,
+      captures: [{ file: 'c1.json', capturedAt: '2026-07-20T12:00:00.000Z', medianGamesPlayed: 17, playerCount: 2, goalieCount: 5 }],
+    }],
+  });
+  const { fetchImpl } = makeFakeFetch({ manifest, captures: {} });
+  const store = createBrowserStore({ baseUrl: BASE_URL, fetchImpl });
+
+  const result = await store.listSnapshotsForLeague({ league: 1 });
+
+  assert.strictEqual(result.seasons[0].latest.goalieCount, 5);
 });
 
 test('listSnapshotsForLeague returns an empty seasons array for a league absent from the manifest', async () => {

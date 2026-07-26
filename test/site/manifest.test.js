@@ -6,7 +6,7 @@ import { join } from 'node:path';
 
 import { writeCapture } from '../../src/store.js';
 import { medianGamesPlayed } from '../../src/median.js';
-import { buildManifest } from '../../src/site/manifest.js';
+import { buildManifest, MANIFEST_SCHEMA_VERSION } from '../../src/site/manifest.js';
 import { makeSnapshot } from '../fixtures.js';
 
 const LEAGUE = 1;
@@ -39,7 +39,7 @@ test('buildManifest is a valid empty structure for a nonexistent data directory,
     // that same graceful behavior, since this IS the state of a fresh Pages deploy.
     const manifest = await buildManifest({ leagues: [0, 1], dataDirUrl: dir });
 
-    assert.strictEqual(manifest.schemaVersion, 1);
+    assert.strictEqual(manifest.schemaVersion, MANIFEST_SCHEMA_VERSION);
     assert.deepStrictEqual(manifest.leagues, [{ league: 0, seasons: [] }, { league: 1, seasons: [] }]);
   });
 });
@@ -73,6 +73,30 @@ test('buildManifest computes medianGamesPlayed identically to the shared src/med
 
     assert.strictEqual(capture.medianGamesPlayed, medianGamesPlayed(snapshot));
     assert.strictEqual(capture.playerCount, 3);
+  });
+});
+
+test('buildManifest reports goalieCount alongside playerCount for each capture', async () => {
+  await withTempDir(async (dir) => {
+    const snapshot = makeSnapshot({ goalies: [{ id: 10 }, { id: 11 }] });
+    await writeCapture({ league: LEAGUE, season: SEASON, snapshot }, dir);
+
+    const manifest = await buildManifest({ leagues: [LEAGUE], dataDirUrl: dir });
+    const [capture] = manifest.leagues[0].seasons[0].captures;
+
+    assert.strictEqual(capture.goalieCount, 2);
+  });
+});
+
+test('buildManifest reports goalieCount: 0 for a capture written before goalie support existed (no goalies key)', async () => {
+  await withTempDir(async (dir) => {
+    const { goalies, ...preGoalieSupportSnapshot } = makeSnapshot();
+    await writeCapture({ league: LEAGUE, season: SEASON, snapshot: preGoalieSupportSnapshot }, dir);
+
+    const manifest = await buildManifest({ leagues: [LEAGUE], dataDirUrl: dir });
+    const [capture] = manifest.leagues[0].seasons[0].captures;
+
+    assert.strictEqual(capture.goalieCount, 0);
   });
 });
 

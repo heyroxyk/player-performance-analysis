@@ -1,12 +1,11 @@
 // The control panel's HTTP server: static asset serving for the browser UI (the same static
 // client the GitHub Pages build ships -- see src/web/staticAssets.js), the /data/* routes that
-// serve local disk captures the same way the Pages artifact serves baked-in ones, and the
-// /api/* JSON routes defined in apiRoutes.js (now reduced to just POST /api/update -- the local
-// disk capture no static site can perform; the other four are a temporary fallback, deleted
-// once the static client is proven out). This is a local, single-user tool that writes files
-// and makes live outbound API calls on a browser's say-so, so every design choice here leans
-// toward the smallest possible attack surface rather than flexibility -- see the inline
-// comments at each check for what it defends against.
+// serve local disk captures the same way the Pages artifact serves baked-in ones, and the one
+// remaining /api/* JSON route defined in apiRoutes.js: POST /api/update, the disk capture no
+// static site can perform. This is a local, single-user tool that writes files and makes live
+// outbound API calls on a browser's say-so, so every design choice here leans toward the
+// smallest possible attack surface rather than flexibility -- see the inline comments at each
+// check for what it defends against.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -14,10 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
 
 import { defaultDeps as commandsDefaultDeps } from '../nodeCommandDeps.js';
-import { defaultDeps as snapshotIndexDefaultDeps } from './snapshotIndex.js';
 import { STATIC_ASSETS, CONTENT_TYPES } from './staticAssets.js';
 import { handleDataRequest } from './dataRoutes.js';
-import { handleLeagues, handleSnapshots, handleRank, handleExport, handleUpdate } from './apiRoutes.js';
+import { handleUpdate } from './apiRoutes.js';
 import { sendError, sendText, HttpError } from './httpUtil.js';
 
 // server.js lives at src/web/server.js -- two levels up is the repo root, which is also where
@@ -93,10 +91,6 @@ function checkPostSecurity(req, port) {
 }
 
 const API_ROUTES = [
-  { method: 'GET', path: '/api/leagues', handle: (req, res, url, ctx) => handleLeagues(res) },
-  { method: 'GET', path: '/api/snapshots', handle: (req, res, url, ctx) => handleSnapshots(url, res, ctx) },
-  { method: 'GET', path: '/api/rank', handle: (req, res, url, ctx) => handleRank(url, res, ctx) },
-  { method: 'GET', path: '/api/export', handle: (req, res, url, ctx) => handleExport(url, res, ctx) },
   { method: 'POST', path: '/api/update', handle: (req, res, url, ctx) => handleUpdate(req, res, ctx) },
 ];
 
@@ -151,11 +145,11 @@ async function requestListener(req, res, ctx) {
 /**
  * Builds an unstarted control panel server. Tests call this directly and listen on port 0
  * themselves; only startControlPanelServer (and therefore serve.js) binds a real port.
- * @param {{commandsDeps?: object, snapshotIndexDeps?: object}} [options]
+ * @param {{commandsDeps?: object}} [options]
  * @returns {import('node:http').Server}
  */
-export function createControlPanelServer({ commandsDeps = commandsDefaultDeps, snapshotIndexDeps = snapshotIndexDefaultDeps } = {}) {
-  const ctx = { commandsDeps, snapshotIndexDeps, inFlightUpdates: new Map() };
+export function createControlPanelServer({ commandsDeps = commandsDefaultDeps } = {}) {
+  const ctx = { commandsDeps, inFlightUpdates: new Map() };
 
   const server = createServer((req, res) => {
     // ctx.port is read from the server's own bound address on every request rather than
@@ -180,11 +174,11 @@ export function createControlPanelServer({ commandsDeps = commandsDefaultDeps, s
  * for this tool: it writes files and makes outbound API calls with no authentication of its
  * own, so nothing beyond this machine should ever be able to reach it. There is deliberately
  * no --host flag to widen that.
- * @param {{port?: number, commandsDeps?: object, snapshotIndexDeps?: object}} [options]
+ * @param {{port?: number, commandsDeps?: object}} [options]
  * @returns {Promise<import('node:http').Server>}
  */
-export function startControlPanelServer({ port = DEFAULT_PORT, commandsDeps, snapshotIndexDeps } = {}) {
-  const server = createControlPanelServer({ commandsDeps, snapshotIndexDeps });
+export function startControlPanelServer({ port = DEFAULT_PORT, commandsDeps } = {}) {
+  const server = createControlPanelServer({ commandsDeps });
 
   return new Promise((resolve, reject) => {
     server.once('error', (error) => {

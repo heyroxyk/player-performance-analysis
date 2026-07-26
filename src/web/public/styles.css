@@ -162,6 +162,13 @@ code {
   color: var(--amber);
 }
 
+/* A live-refreshed leaderboard (see liveRefreshButton in app.js) is never stale by definition --
+   it's the same cyan the ready status-pill state and the sort-active column headers already
+   use, so "live" reads as a distinct, positive state rather than a variant of "stale". */
+.freshness-readout.live {
+  color: var(--cyan);
+}
+
 /* ---------------------------------------------------------------------- layout */
 
 .layout {

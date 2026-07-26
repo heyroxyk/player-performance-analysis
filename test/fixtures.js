@@ -42,11 +42,48 @@ export function makeTrimmedPlayerRow(overrides = {}) {
   };
 }
 
-// A full stored snapshot file (see src/store.js).
+// A full stored snapshot file (see src/store.js). `goalies` defaults to an empty array (a
+// post-goalie-support capture with no goalies recorded) rather than being omitted -- omitting it
+// entirely is its own distinct, deliberately different fixture shape for pre-goalie-support
+// captures; see test/goalieCommands.test.js for that case specifically.
 export function makeSnapshot(overrides = {}) {
   return {
     league: 1, season: 89, capturedAt: '2026-07-20T12:00:00.000Z',
     players: [makeTrimmedPlayerRow()],
+    goalies: [],
+    ...overrides,
+  };
+}
+
+// One row as returned by GET /api/v1/goalies/stats. gaa/savePct are the API's own rounded
+// STRINGS (verified live) -- kept as strings here too, since trimGoalieRow must never read them.
+export function makeGoalieStatsRow(overrides = {}) {
+  return {
+    id: 5118, name: 'Test Goalie', position: 'G', league: 1, team: 'BUF', season: 89,
+    gamesPlayed: 15, minutes: 843, wins: 11, losses: 3, ot: 1,
+    shotsAgainst: 440, saves: 395, goalsAgainst: 45, gaa: '3.20', shutouts: 0, savePct: '0.898',
+    gameRating: 71, rookie: false,
+    ...overrides,
+  };
+}
+
+// One row as returned by GET /api/v1/goalies/ratings.
+export function makeGoalieRatingsRow(overrides = {}) {
+  return {
+    id: 5118, league: 1, season: 89, name: 'Test Goalie', team: 'BUF', position: 'G',
+    blocker: 14, glove: 15, reflexes: 13, goalieStamina: 11, appliedTPE: 346,
+    ...overrides,
+  };
+}
+
+// One row as stored on disk after trimming (see src/snapshotBuild.js GOALIE_STORED_STAT_FIELDS).
+// No savePct/gaa (derived on read, never stored) and no advancedStats (goalie rows never have one).
+export function makeTrimmedGoalieRow(overrides = {}) {
+  return {
+    id: 5118, name: 'Test Goalie', position: 'G', team: 'BUF',
+    gamesPlayed: 15, minutes: 843, wins: 11, losses: 3, ot: 1,
+    shotsAgainst: 440, saves: 395, goalsAgainst: 45, shutouts: 0, gameRating: 71,
+    appliedTPE: 346,
     ...overrides,
   };
 }

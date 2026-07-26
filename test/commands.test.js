@@ -85,7 +85,7 @@ test('captureUpdate reduces a non-skipped capture to a plain result with the res
   const deps = {
     captureSnapshot: trackCalls(async () => ({
       skipped: false,
-      snapshot: makeSnapshot({ season: SEASON, players: [{}, {}, {}] }),
+      snapshot: makeSnapshot({ season: SEASON, players: [{}, {}, {}], goalies: [{}] }),
     })),
   };
 
@@ -96,8 +96,23 @@ test('captureUpdate reduces a non-skipped capture to a plain result with the res
     league: LEAGUE,
     season: SEASON,
     playerCount: 3,
+    goalieCount: 1,
     capturedAt: '2026-07-20T12:00:00.000Z',
   });
+});
+
+test('captureUpdate reports goalieCount: 0 for an existing on-disk snapshot that predates goalie support', async () => {
+  const deps = {
+    captureSnapshot: trackCalls(async () => ({
+      skipped: true,
+      reason: 'unchanged',
+      snapshot: { league: LEAGUE, season: SEASON, capturedAt: '2026-07-20T12:00:00.000Z', players: [] }, // no goalies key
+    })),
+  };
+
+  const result = await captureUpdate({ league: LEAGUE, season: SEASON }, deps);
+
+  assert.equal(result.goalieCount, 0);
 });
 
 test('captureUpdate reflects skipped: true through unchanged', async () => {

@@ -8,15 +8,23 @@
 /**
  * Diffs two already-ranked arrays (see pirEngine's rankByPir -- each row has
  * at least { id, pir }, and array index IS rank, 0-based) to compute
- * per-player rank and PIR movement since the previous snapshot.
- * @param {Array<{id: number, pir: number}>} currentRows
- * @param {Array<{id: number, pir: number}> | null | undefined} previousRows - null/undefined when no previous snapshot exists yet
+ * per-player rank and score movement since the previous snapshot.
+ *
+ * `scoreKey`/`deltaKey` default to PIR's own field names so every existing skater caller is
+ * unaffected; the goalie side (see src/pir/goalieEngine.js, src/goalieCommands.js) passes
+ * `{ scoreKey: 'gir', deltaKey: 'girDelta' }` to diff GIR instead, since a goalie row has no
+ * `pir` field at all. The function only ever reads whatever field `scoreKey` names, so this is a
+ * one-line parameterization, not a fork: the rank-movement logic itself (which never reads
+ * scoreKey/deltaKey) is identical for both.
+ * @param {Array<{id: number}>} currentRows
+ * @param {Array<{id: number}> | null | undefined} previousRows - null/undefined when no previous snapshot exists yet
+ * @param {{scoreKey?: string, deltaKey?: string}} [options]
  * @returns {Array<object>} a new array shaped like currentRows; each row gains
- *   isNew, and (only when isNew is false) rankDelta and pirDelta
+ *   isNew, and (only when isNew is false) rankDelta and the named deltaKey
  */
-export function computeMovement(currentRows, previousRows) {
+export function computeMovement(currentRows, previousRows, { scoreKey = 'pir', deltaKey = 'pirDelta' } = {}) {
   // No prior snapshot to compare against -- return an unadorned copy rather
-  // than fabricating isNew/rankDelta/pirDelta values that would imply a
+  // than fabricating isNew/rankDelta/deltaKey values that would imply a
   // comparison we can't actually make.
   if (previousRows == null) {
     return currentRows.map((row) => ({ ...row }));
@@ -37,7 +45,7 @@ export function computeMovement(currentRows, previousRows) {
       ...row,
       isNew: false,
       rankDelta: previousIndex - currentIndex,
-      pirDelta: row.pir - previousRows[previousIndex].pir,
+      [deltaKey]: row[scoreKey] - previousRows[previousIndex][scoreKey],
     };
   });
 }

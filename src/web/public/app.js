@@ -10,15 +10,27 @@
 // is where the data comes from (a live local filesystem vs. a prebuilt manifest baked into the
 // deploy), never how a leaderboard gets scored. The one thing that genuinely can't exist without
 // a server -- writing a new capture to disk -- stays local-only, gated on the manifest's own
-// `localCapture` flag (see updateCaptureAvailability below).
+// `localCapture` flag (see updateCaptureAvailability below). Live Refresh (see runLiveRefresh) is
+// the opposite: it needs no server at all, so it's available in both worlds identically.
 
-import { formatTimeOnIce, formatRankMovement, formatPirDelta, formatRelativeTime, filterRows, sortRows, hasVariedStatus } from './format.js';
+import { formatTimeOnIce, formatRankMovement, formatPirDelta, formatGirDelta, formatRelativeTime, filterRows, sortRows, hasVariedStatus } from './format.js';
 import { getRanking, formatRanking } from '../../commands.js';
+import { getGoalieRanking, formatGoalieRanking } from '../../goalieCommands.js';
 import { createBrowserStore } from '../../browserStore.js';
 import { createBrowserCommandDeps } from '../../browserCommandDeps.js';
 
 const LEAGUES = [{ id: 0, name: 'SHL' }, { id: 1, name: 'SMJHL' }];
 const POSITION_FILTERS = ['ALL', 'F', 'D', 'C', 'LW', 'RW', 'LD', 'RD'];
+const MODES = [{ id: 'skaters', label: 'Skaters' }, { id: 'goalies', label: 'Goalies' }];
+// Every window option skaters can pick; goalies drop '5' -- see renderWindowOptions -- since a
+// ~5-game goalie window (a few dozen shots at most) always blocks on
+// MIN_WINDOW_SHOTS_AGAINST_HARD (src/pir/goalieWindow.js), so offering it is a trap, not a choice.
+const WINDOW_OPTIONS = [
+  { value: '', label: 'Season to date' },
+  { value: '5', label: 'Last ~5 games', skatersOnly: true },
+  { value: '8', label: 'Last ~8 games' },
+  { value: '12', label: 'Last ~12 games' },
+];
 
 // Past this age, a capture is old enough that a scheduled capture run was likely missed --
 // see styles.css's .freshness-readout.stale for the visual treatment.
@@ -39,8 +51,12 @@ const EXPORT_EXTENSIONS = { table: 'txt', json: 'json', csv: 'csv' };
 // configuration, no build-time base injection, no environment branch.
 const DATA_BASE_URL = new URL('../../../data/', import.meta.url);
 
-const store = createBrowserStore({ baseUrl: DATA_BASE_URL });
-const deps = createBrowserCommandDeps({ store });
+// Reassigned by runLiveRefresh (see below) to swap in a store/deps pair backed by an ephemeral
+// live snapshot -- every other function reads these via the module scope at call time, never by
+// destructuring a method off them up front, so a live refresh takes effect everywhere with no
+// further plumbing.
+let store = createBrowserStore({ baseUrl: DATA_BASE_URL });
+let deps = createBrowserCommandDeps({ store });
 
 // Window mode swaps in a couple of columns (see src/report/table.js's identical
 // buildColumns(includeMovement, includeWindow) for the server-side analogue) -- GP/TOI are
@@ -107,7 +123,53 @@ function buildColumns(isWindow, isStatus) {
   return columns;
 }
 
+// The goalie analogue of buildColumns -- mirrors src/report/goalieTable.js's own buildColumns
+// exactly, since a goalie row shares almost no fields with a skater row (see
+// src/pir/goalieEngine.js). No Pos column (every goalie row is position 'G', which would just
+// repeat the same letter down the whole column) and no Baseline-driven grouping (a single-position
+// pool has nothing to group by).
+function buildGoalieColumns(isWindow, isStatus) {
+  const columns = [
+    { key: 'rank', label: 'Rank', align: 'right', sortable: false },
+    { key: 'mvmt', label: 'Mvmt', align: 'left', sortable: false },
+    { key: 'name', label: 'Player', align: 'left', sortable: true },
+    { key: 'team', label: 'Team', align: 'left', sortable: true },
+  ];
+  if (isStatus) {
+    columns.push({ key: 'status', label: 'Status', align: 'left', sortable: true });
+  }
+  columns.push(
+    { key: 'gamesPlayed', label: isWindow ? 'GP (win)' : 'GP', align: 'right', sortable: true },
+    { key: 'minutes', label: isWindow ? 'MIN (win)' : 'MIN', align: 'right', sortable: true },
+    { key: 'shotsAgainst', label: isWindow ? 'SA (win)' : 'SA', align: 'right', sortable: true },
+  );
+  if (isWindow) {
+    columns.push({ key: 'seasonGamesPlayed', label: 'Season GP', align: 'right', sortable: true });
+  }
+  columns.push(
+    { key: 'savePct', label: 'SV%', align: 'right', sortable: true },
+    { key: 'shrunkSavePct', label: 'xSV%', align: 'right', sortable: true },
+    // How much of the shrunk estimate is this goalie's OWN record versus the league mean -- see
+    // src/pir/goalieEngine.js's ownSignal. Placed right next to SV%/xSV%, not hidden in a
+    // tooltip, since judging whether a gap between two goalies is real requires seeing this.
+    { key: 'ownSignal', label: 'Sig%', align: 'right', sortable: true },
+    { key: 'gir', label: 'GIR', align: 'right', sortable: true },
+    { key: 'girDelta', label: 'GIR +/-', align: 'right', sortable: false },
+    { key: 'gsar', label: 'GSAR', align: 'right', sortable: true },
+    { key: 'luck', label: 'Luck', align: 'right', sortable: true },
+    { key: 'appliedTPE', label: 'TPE', align: 'right', sortable: true },
+  );
+  return columns;
+}
+
 const state = {
+  // 'skaters' | 'goalies' -- see renderModeChips/updateModeVisibility. Every other piece of
+  // state below (league, season, status, movement, windowGames, filterQuery, sort, etc.) is
+  // shared across both modes; only the shrinkage value needs two separate fields, since
+  // skater shrinkage is in minutes and goalie shrinkage is in shots faced -- two different units
+  // that must never collapse into one field lest a value entered for one mode silently gets
+  // reinterpreted in the other's unit after a mode switch.
+  mode: 'skaters',
   league: 0,
   season: undefined,
   baseline: 'league',
@@ -115,6 +177,7 @@ const state = {
   movement: true,
   // null = adaptive (server-resolved, scaled to sample depth); a number = an explicit override.
   shrinkageMinutes: null,
+  shrinkageShots: null,
   // null = season-to-date; a number = "last ~N games".
   windowGames: null,
   filterQuery: '',
@@ -123,8 +186,12 @@ const state = {
   sortKey: 'rank',
   sortDirection: 'asc',
   snapshotsByLeague: new Map(),
-  ranking: null, // { meta, players, excluded }
-  // PIR-derived rank by player id, kept OUT of the row objects themselves (see loadRanking) so
+  // { meta, players, excluded } -- `players` holds whichever mode's ranked rows are current
+  // (skater rows in 'skaters' mode, goalie rows in 'goalies' mode); the field name is not
+  // renamed per mode to avoid touching every downstream reference to it for a purely cosmetic
+  // difference.
+  ranking: null,
+  // Rank by row id, kept OUT of the row objects themselves (see loadRanking) so
   // re-sorting the on-screen table by a different column can never leak into what gets
   // exported -- toJson would otherwise serialize a `rank` key the CLI's own output never has.
   rankById: new Map(),
@@ -138,6 +205,11 @@ const state = {
   // exposes POST /api/update for a real disk capture -- the manifest itself reports this (see
   // init()), so the client never has to probe or guess.
   localCapture: false,
+  // {league, season} of the last successful live refresh (see runLiveRefresh), or null. Compared
+  // against the CURRENTLY DISPLAYED ranking's meta in renderFreshness -- not a bare boolean --
+  // so switching league/season away from the live one correctly stops showing "live" without
+  // this needing to be reset from every state-changing call site.
+  liveSnapshotMeta: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -181,6 +253,20 @@ async function getRankingTagged(args) {
   }
 }
 
+// The goalie analogue of getRankingTagged -- same tagging, calling src/goalieCommands.js's
+// getGoalieRanking instead. getGoalieRanking's own .notFound also covers a capture that predates
+// goalie support entirely (no `goalies` array at all), which reads to the user identically to
+// "no snapshot found" -- both mean "there's nothing to rank yet for this league/season".
+async function getGoalieRankingTagged(args) {
+  try {
+    return await getGoalieRanking(args, deps);
+  } catch (error) {
+    if (error.notFound) error.code = 'NO_SNAPSHOT';
+    if (error.windowUnavailable) error.code = 'WINDOW_UNAVAILABLE';
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // DOM refs
 // ---------------------------------------------------------------------------
@@ -189,15 +275,20 @@ const el = {
   freshnessReadout: document.getElementById('freshnessReadout'),
   dataDirReadout: document.getElementById('dataDirReadout'),
   statusPill: document.getElementById('statusPill'),
+  modeChips: document.getElementById('modeChips'),
+  goalieModeNote: document.getElementById('goalieModeNote'),
   leagueChips: document.getElementById('leagueChips'),
   seasonSelect: document.getElementById('seasonSelect'),
   seasonNote: document.getElementById('seasonNote'),
+  liveRefreshButton: document.getElementById('liveRefreshButton'),
+  liveRefreshStatus: document.getElementById('liveRefreshStatus'),
   captureButton: document.getElementById('captureButton'),
   captureStatus: document.getElementById('captureStatus'),
   newSeasonToggle: document.getElementById('newSeasonToggle'),
   newSeasonForm: document.getElementById('newSeasonForm'),
   newSeasonInput: document.getElementById('newSeasonInput'),
   newSeasonCapture: document.getElementById('newSeasonCapture'),
+  baselineBlock: document.getElementById('baselineBlock'),
   baselineChips: document.getElementById('baselineChips'),
   statusSelect: document.getElementById('statusSelect'),
   windowSelect: document.getElementById('windowSelect'),
@@ -205,7 +296,10 @@ const el = {
   movementToggle: document.getElementById('movementToggle'),
   movementNote: document.getElementById('movementNote'),
   shrinkInput: document.getElementById('shrinkInput'),
+  shrinkageUnitLabel: document.getElementById('shrinkageUnitLabel'),
+  shrinkageNote: document.getElementById('shrinkageNote'),
   metaStrip: document.getElementById('metaStrip'),
+  noSignalBanner: document.getElementById('noSignalBanner'),
   excludedBanner: document.getElementById('excludedBanner'),
   excludedToggle: document.getElementById('excludedToggle'),
   excludedList: document.getElementById('excludedList'),
@@ -259,6 +353,69 @@ function renderChips(container, options, activeValue, onSelect) {
     button.addEventListener('click', () => onSelect(option.value));
     container.appendChild(button);
   }
+}
+
+function renderModeChips() {
+  const options = MODES.map((mode) => ({ value: mode.id, label: mode.label }));
+  renderChips(el.modeChips, options, state.mode, (value) => {
+    if (value === state.mode) return;
+    state.mode = value;
+    // Neither the position filter nor an in-flight window/expanded selection means anything
+    // across a mode switch (a goalie row's position is always 'G', and shrinkage is tracked in
+    // two separate fields precisely so switching modes never reinterprets one mode's value in
+    // the other's unit -- see state's own comment) -- resetting the on-screen filter/expansion
+    // state here avoids carrying over a selection that silently stops applying.
+    state.filterPosition = 'ALL';
+    state.expandedId = null;
+    renderModeChips(); // see renderBaselineChips' comment on the same self-re-invoking pattern
+    updateModeVisibility();
+    refreshSnapshotsAndRanking();
+  });
+}
+
+// Toggles every piece of UI that only makes sense for ONE mode: Baseline and the position filter
+// are skater-only (a single-position goalie pool has nothing to group or filter by), the goalie
+// scoring-methodology note is goalie-only, and the Shrinkage block's unit label/help text and the
+// Window select's option set both need mode-aware TEXT even though the controls themselves are
+// shared. Called once at init() and again on every mode switch.
+function updateModeVisibility() {
+  const isGoalieMode = state.mode === 'goalies';
+
+  el.baselineBlock.classList.toggle('hidden', isGoalieMode);
+  el.positionChips.classList.toggle('hidden', isGoalieMode);
+  el.goalieModeNote.classList.toggle('hidden', !isGoalieMode);
+
+  el.shrinkageUnitLabel.textContent = isGoalieMode ? '(shots)' : '(min)';
+  el.shrinkInput.setAttribute('aria-label', `Shrinkage constant in ${isGoalieMode ? 'shots faced' : 'minutes'}`);
+  el.shrinkageNote.textContent = isGoalieMode
+    ? 'Pulls a goalie\'s save percentage toward the league mean, scaled to how much of the observed talent spread is real versus binomial luck. Blank = adaptive (recommended); 0 disables it entirely.'
+    : 'Pulls small-sample rates toward the league mean, scaled to sample depth. Blank = adaptive (recommended); 0 disables it entirely.';
+  // Re-syncs the visible input to the NEWLY ACTIVE mode's own shrinkage field -- without this, a
+  // value typed in one mode would keep showing (unapplied) after switching to the other, which
+  // reads as "this value is in effect" when it silently is not.
+  const activeShrinkageValue = isGoalieMode ? state.shrinkageShots : state.shrinkageMinutes;
+  el.shrinkInput.value = activeShrinkageValue === null ? '' : String(activeShrinkageValue);
+
+  renderWindowOptions();
+}
+
+// Rebuilds the Window select's option list for the current mode, preserving the current
+// selection when it still exists in the new list (falls back to season-to-date otherwise, e.g.
+// switching TO goalie mode while '~5 games' was selected).
+function renderWindowOptions() {
+  const currentValue = el.windowSelect.value;
+  clearChildren(el.windowSelect);
+
+  for (const option of WINDOW_OPTIONS) {
+    if (option.skatersOnly && state.mode === 'goalies') continue;
+    const optionEl = textEl('option', null, option.label);
+    optionEl.value = option.value;
+    el.windowSelect.appendChild(optionEl);
+  }
+
+  const stillExists = [...el.windowSelect.options].some((option) => option.value === currentValue);
+  el.windowSelect.value = stillExists ? currentValue : '';
+  if (!stillExists) state.windowGames = null;
 }
 
 function renderLeagueChips() {
@@ -324,9 +481,11 @@ function renderSeasonSelect() {
     const option = document.createElement('option');
     option.value = String(seasonInfo.season);
     const when = seasonInfo.latest ? new Date(seasonInfo.latest.capturedAt).toLocaleString() : 'unknown';
-    const players = seasonInfo.latest ? `${seasonInfo.latest.playerCount} skaters` : '';
+    // Shown regardless of the current mode -- both counts are useful context either way (e.g.
+    // spotting a season with skaters captured but zero goalies yet).
+    const counts = seasonInfo.latest ? `${seasonInfo.latest.playerCount} skaters / ${seasonInfo.latest.goalieCount ?? 0} goalies` : '';
     const flags = seasonInfo.corrupt ? ' -- CORRUPT' : seasonInfo.previous ? '' : ' -- no previous capture';
-    option.textContent = `Season ${seasonInfo.season} -- ${when} -- ${players}${flags}`;
+    option.textContent = `Season ${seasonInfo.season} -- ${when} -- ${counts}${flags}`;
     if (seasonInfo.corrupt) option.disabled = true;
     el.seasonSelect.appendChild(option);
   }
@@ -391,7 +550,7 @@ async function runCapture(season) {
     });
     el.captureStatus.textContent = result.skipped
       ? `Season ${result.season} is already finished and captured -- no network call made.`
-      : `Captured ${result.playerCount} players for season ${result.season} in ${((result.durationMs ?? 0) / 1000).toFixed(1)}s.`;
+      : `Captured ${result.playerCount} players and ${result.goalieCount} goalies for season ${result.season} in ${((result.durationMs ?? 0) / 1000).toFixed(1)}s.`;
     // A soft, non-fatal Portal status-lookup failure (see snapshot.js's captureSnapshot) --
     // every player's status silently fell back to 'unknown' for this capture, worth surfacing
     // right next to the capture result rather than only in a server log.
@@ -421,6 +580,46 @@ async function runCapture(season) {
 }
 
 // ---------------------------------------------------------------------------
+// live refresh
+// ---------------------------------------------------------------------------
+
+// Pulls the CURRENT season's stats straight from the league API into memory -- no disk write, no
+// server round trip -- and swaps in a store/deps pair backed by that snapshot (see
+// src/browserStore.js's liveSnapshot option and src/browserCommandDeps.js's captureSnapshot).
+// Available in both local and hosted contexts, unlike captureButton: a live refresh never
+// touches disk, so there's nothing here the hosted, read-only site can't do too. Deliberately
+// omits `season` from the captureSnapshot call -- a live refresh always means "the current
+// season, right now", never whatever archived season happens to be selected in the dropdown.
+async function runLiveRefresh() {
+  el.liveRefreshButton.disabled = true;
+  el.liveRefreshStatus.textContent = 'Fetching live data...';
+  setStatus('busy', 'live refresh');
+  try {
+    const result = await deps.captureSnapshot({ league: state.league });
+    store = createBrowserStore({ baseUrl: DATA_BASE_URL, liveSnapshot: result.snapshot });
+    deps = createBrowserCommandDeps({ store });
+    state.season = result.snapshot.season;
+    state.liveSnapshotMeta = { league: result.snapshot.league, season: result.snapshot.season };
+
+    el.liveRefreshStatus.textContent = `Live data fetched for ${result.snapshot.players.length} players and ${result.snapshot.goalies.length} goalies, just now.`;
+    // A soft, non-fatal Portal status-lookup failure (see snapshotBuild.js's buildSnapshot) --
+    // every player's status silently fell back to 'unknown' for this refresh, worth surfacing
+    // right next to the result, matching runCapture's identical handling of the same warning.
+    if (result.warning) {
+      el.liveRefreshStatus.textContent += ` ${result.warning}`;
+    }
+    hideError();
+    await loadSnapshots();
+    await loadRanking();
+  } catch (error) {
+    showError(error);
+  } finally {
+    el.liveRefreshButton.disabled = false;
+    setStatus('ready', 'idle');
+  }
+}
+
+// ---------------------------------------------------------------------------
 // ranking
 // ---------------------------------------------------------------------------
 
@@ -431,16 +630,26 @@ function renderMetaStrip() {
     return;
   }
   const league = LEAGUES.find((l) => l.id === meta.league)?.name ?? `League ${meta.league}`;
-  const parts = [
-    `${league}`,
-    `Season ${meta.season}`,
-    `Baseline: ${meta.baseline}`,
-    `Captured ${new Date(meta.capturedAt).toLocaleString()}`,
-  ];
+  const parts = [`${league}`, `Season ${meta.season}`];
+
+  // Goalie meta has no `baseline` at all (a single-position pool has nothing to group by -- see
+  // src/goalieCommands.js) and reports the league/replacement save percentage baseline the
+  // shrinkage was actually computed against, which a skater ranking has no equivalent of.
+  if (state.mode === 'goalies') {
+    parts.push(`League SV%: ${meta.leagueSavePct.toFixed(4)}`, `Replacement SV%: ${meta.replacementSavePct.toFixed(4)}`);
+  } else {
+    parts.push(`Baseline: ${meta.baseline}`);
+  }
+
+  parts.push(`Captured ${new Date(meta.capturedAt).toLocaleString()}`);
   if (meta.window) {
     parts.push(`Window: last ~${meta.window.requestedGames} (resolved ${meta.window.resolvedGames})`);
   }
-  parts.push(`Shrinkage: ${Math.round(meta.shrinkageMinutes)}min (${meta.shrinkageMode})`);
+  parts.push(
+    state.mode === 'goalies'
+      ? `Shrinkage: K=${Math.round(meta.shrinkageShots)} shots (${meta.shrinkageMode})`
+      : `Shrinkage: ${Math.round(meta.shrinkageMinutes)}min (${meta.shrinkageMode})`,
+  );
   el.metaStrip.textContent = parts.join('  ·  ');
 }
 
@@ -456,14 +665,22 @@ function renderFreshness() {
   if (!meta) {
     el.freshnessReadout.textContent = '';
     el.freshnessReadout.title = '';
-    el.freshnessReadout.classList.remove('stale');
+    el.freshnessReadout.classList.remove('stale', 'live');
     return;
   }
 
+  // Whether the CURRENTLY DISPLAYED ranking (not just "a live refresh happened at some point")
+  // is the live one -- switching league or season away from it must fall back to the normal
+  // "Captured N ago" reading, matching how src/browserStore.js's own isLiveFor decides whether
+  // the live snapshot applies to a given league/season.
+  const isLive = state.liveSnapshotMeta?.league === meta.league && state.liveSnapshotMeta?.season === meta.season;
   const capturedAt = new Date(meta.capturedAt);
-  el.freshnessReadout.textContent = `Captured ${formatRelativeTime(capturedAt, new Date())}`;
+  el.freshnessReadout.textContent = isLive
+    ? `${formatRelativeTime(capturedAt, new Date())} · live, not saved`
+    : `Captured ${formatRelativeTime(capturedAt, new Date())}`;
   el.freshnessReadout.title = capturedAt.toLocaleString();
-  el.freshnessReadout.classList.toggle('stale', Date.now() - capturedAt.getTime() > STALE_CAPTURE_MS);
+  el.freshnessReadout.classList.toggle('live', isLive);
+  el.freshnessReadout.classList.toggle('stale', !isLive && Date.now() - capturedAt.getTime() > STALE_CAPTURE_MS);
 }
 
 function startFreshnessTimer() {
@@ -477,12 +694,21 @@ function renderExcludedBanner() {
     el.excludedBanner.classList.add('hidden');
     return;
   }
+  const noun = state.mode === 'goalies' ? 'goalie' : 'skater';
   el.excludedBanner.classList.remove('hidden');
-  el.excludedToggle.textContent = `${excluded.length} skater${excluded.length === 1 ? '' : 's'} excluded from scoring (click to view)`;
+  el.excludedToggle.textContent = `${excluded.length} ${noun}${excluded.length === 1 ? '' : 's'} excluded from scoring (click to view)`;
   clearChildren(el.excludedList);
   for (const { row, reason } of excluded) {
     el.excludedList.appendChild(textEl('li', null, `${row.name} -- ${reason}`));
   }
+}
+
+// Surfaces src/pir/goalieEngine.js's adaptiveShrinkageShots noSignal flag as a page-level
+// warning: when no goalie talent spread is detectable above binomial luck yet, GIR ranks are
+// close to arbitrary and a user needs to know that rather than trusting a confidently-rendered
+// leaderboard. Never true in skater mode -- skater meta has no noSignal field at all.
+function updateNoSignalBanner() {
+  el.noSignalBanner.classList.toggle('hidden', !state.ranking?.meta?.noSignal);
 }
 
 // The single shared builder for getRanking's args -- both loadRanking and exportRanking need
@@ -499,6 +725,20 @@ function buildRankArgs() {
   };
   if (state.season !== undefined) args.season = state.season;
   if (state.shrinkageMinutes !== null) args.shrinkageMinutes = state.shrinkageMinutes;
+  if (state.windowGames !== null) args.windowGames = state.windowGames;
+  return args;
+}
+
+// The goalie analogue of buildRankArgs -- no `baseline` at all, and `shrinkageShots` (a distinct
+// state field, see state's own comment on why) rather than `shrinkageMinutes`.
+function buildGoalieRankArgs() {
+  const args = {
+    league: state.league,
+    status: state.status,
+    movement: state.movement,
+  };
+  if (state.season !== undefined) args.season = state.season;
+  if (state.shrinkageShots !== null) args.shrinkageShots = state.shrinkageShots;
   if (state.windowGames !== null) args.windowGames = state.windowGames;
   return args;
 }
@@ -529,8 +769,12 @@ function exportRanking(format) {
   // top: undefined -- matching the CLI's own unset --top default (Infinity, i.e. every row) --
   // export has never reflected the on-screen "Rows to show" limiter, by design (see the export
   // caption in index.html).
-  const formatted = formatRanking(state.ranking.players, { format, top: undefined, meta }, deps);
-  const filename = `pir-league${meta.league}-season${meta.season}.${EXPORT_EXTENSIONS[format]}`;
+  const isGoalieMode = state.mode === 'goalies';
+  const formatted = isGoalieMode
+    ? formatGoalieRanking(state.ranking.players, { format, top: undefined, meta }, deps)
+    : formatRanking(state.ranking.players, { format, top: undefined, meta }, deps);
+  const filenamePrefix = isGoalieMode ? 'gir' : 'pir';
+  const filename = `${filenamePrefix}-league${meta.league}-season${meta.season}.${EXPORT_EXTENSIONS[format]}`;
   downloadBlob(filename, formatted, EXPORT_CONTENT_TYPES[format]);
 }
 
@@ -549,8 +793,8 @@ async function loadRanking() {
   el.tableWrap.setAttribute('aria-busy', 'true');
 
   try {
-    const args = buildRankArgs();
-    const result = await getRankingTagged(args);
+    const args = state.mode === 'goalies' ? buildGoalieRankArgs() : buildRankArgs();
+    const result = state.mode === 'goalies' ? await getGoalieRankingTagged(args) : await getRankingTagged(args);
     if (requestId !== state.rankRequestId) return; // a newer request has since started
 
     // Rank is tracked by id, out of band from the row objects themselves -- see state.rankById's
@@ -589,6 +833,7 @@ async function loadRanking() {
   renderMetaStrip();
   renderFreshness();
   renderExcludedBanner();
+  updateNoSignalBanner();
   updateWindowAvailability();
   updateMovementAvailability();
   renderTable();
@@ -734,6 +979,81 @@ function buildDetailGrid(row) {
 // plain text rather than a link to a guessed or wrong URL.
 const PORTAL_PLAYER_URL_BASE = 'https://portal.simulationhockey.com/player/';
 
+// Builds the shared `<td class="player-cell">` for a name column -- a Portal profile link when
+// portalId resolved, plain text otherwise. Shared by renderRow and renderGoalieRow (a goalie row
+// carries portalId from the exact same Portal join as a skater row -- see
+// src/snapshotBuild.js's buildSnapshot -- so the two boards must never diverge on when a name
+// does or doesn't get a link).
+function buildNameCell(row) {
+  const td = document.createElement('td');
+  td.classList.add('player-cell');
+
+  if (row.portalId != null) {
+    const link = document.createElement('a');
+    link.className = 'player-link';
+    link.href = `${PORTAL_PLAYER_URL_BASE}${row.portalId}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = `Open ${row.name}'s Portal profile`;
+    link.textContent = row.name;
+    // Without this, the click would also bubble to the row's own listener below and toggle the
+    // detail row open/closed at the same moment a new tab opens -- confusing and unnecessary,
+    // since opening the profile is a complete action on its own.
+    link.addEventListener('click', (event) => event.stopPropagation());
+    td.appendChild(link);
+  } else {
+    td.textContent = row.name;
+  }
+
+  return td;
+}
+
+// The goalie analogue of buildDetailGrid. A goalie has no per-component z-score breakdown to
+// show (see src/pir/goalieComponents.js -- there is exactly one scored component, and no
+// z-score at all), so instead of a weighted-components bar chart this shows the actual
+// arithmetic that produced GIR/GSAR: how many shots backed the estimate, how much of it is the
+// goalie's own record versus the league mean (the single most important number for judging
+// whether a gap between two goalies is real -- see the project's own emphasis on communicating
+// this), and the luck decomposition between GSAR and what GIR alone would have predicted.
+function buildGoalieDetailGrid(row) {
+  const grid = document.createElement('div');
+  grid.className = 'detail-grid';
+
+  const ownSignalPct = Math.round(row.ownSignal * 100);
+  const items = [
+    ['Shots faced', `${row.shotsAgainst} shots, ${row.saves} saves -> observed ${row.savePct.toFixed(4)}`],
+    ['Shrunk to', `${ownSignalPct}% own record / ${100 - ownSignalPct}% league mean -> ${row.shrunkSavePct.toFixed(4)}`],
+    ['GIR', `${row.gir.toFixed(2)} goals saved per 1000 shots, above replacement`],
+    ['GSAR', `${row.gsar.toFixed(2)} goals = ${row.expectedGsar.toFixed(2)} expected from GIR + ${row.luck.toFixed(2)} luck`],
+  ];
+
+  for (const [label, text] of items) {
+    const item = document.createElement('div');
+    item.className = 'detail-item';
+    item.appendChild(textEl('span', 'detail-label', label));
+    item.appendChild(textEl('span', 'mono', text));
+    grid.appendChild(item);
+  }
+
+  // A single-direction bar (0-100%, not the two-sided weighted-component bar skaters get) --
+  // the visual equivalent of the "Shrunk to" line above, so a reader can compare two goalies'
+  // own-signal at a glance rather than reading two percentages.
+  const signalItem = document.createElement('div');
+  signalItem.className = 'detail-item';
+  signalItem.appendChild(textEl('span', 'detail-label', 'Own signal'));
+  const track = document.createElement('div');
+  track.className = 'detail-bar-track';
+  const fill = document.createElement('div');
+  fill.className = 'detail-bar-fill';
+  fill.style.left = '0%';
+  fill.style.width = `${ownSignalPct}%`;
+  track.appendChild(fill);
+  signalItem.appendChild(track);
+  grid.appendChild(signalItem);
+
+  return grid;
+}
+
 function renderRow(row, columns) {
   const tr = document.createElement('tr');
   tr.className = 'data-row';
@@ -759,34 +1079,66 @@ function renderRow(row, columns) {
   };
 
   for (const column of columns) {
+    if (column.key === 'name') {
+      tr.appendChild(buildNameCell(row));
+      continue;
+    }
+
     const td = document.createElement('td');
     if (column.align === 'right') td.classList.add('num');
     if (column.key === 'rank') td.classList.add('rank-cell');
     if (column.key === 'pir') td.classList.add('pir-cell');
     if (column.key === 'mvmt') td.classList.add(movementClass(row));
+    td.textContent = cells[column.key];
+    tr.appendChild(td);
+  }
 
+  tr.addEventListener('click', () => {
+    state.expandedId = state.expandedId === row.id ? null : row.id;
+    renderTable();
+  });
+
+  return tr;
+}
+
+// The goalie analogue of renderRow, built off buildGoalieColumns' column set instead of
+// buildColumns' -- no Pos cell (every goalie row is position 'G'), and PIR/Total/pirDelta are
+// replaced by SV%/xSV%/Sig%/GIR/GIR+/-/GSAR/Luck (see src/pir/goalieEngine.js).
+function renderGoalieRow(row, columns) {
+  const tr = document.createElement('tr');
+  tr.className = 'data-row';
+  tr.dataset.id = String(row.id);
+
+  const cells = {
+    rank: String(state.rankById.get(row.id) ?? ''),
+    mvmt: formatRankMovement(row),
+    team: row.team,
+    status: row.status ?? 'unknown',
+    gamesPlayed: String(row.gamesPlayed),
+    minutes: String(row.minutes),
+    shotsAgainst: String(row.shotsAgainst),
+    seasonGamesPlayed: row.seasonGamesPlayed !== undefined ? String(row.seasonGamesPlayed) : '',
+    savePct: row.savePct.toFixed(3),
+    shrunkSavePct: row.shrunkSavePct.toFixed(3),
+    ownSignal: `${Math.round(row.ownSignal * 100)}%`,
+    gir: row.gir.toFixed(2),
+    girDelta: formatGirDelta(row),
+    gsar: row.gsar.toFixed(2),
+    luck: row.luck.toFixed(2),
+    appliedTPE: String(row.appliedTPE),
+  };
+
+  for (const column of columns) {
     if (column.key === 'name') {
-      td.classList.add('player-cell');
-      if (row.portalId != null) {
-        const link = document.createElement('a');
-        link.className = 'player-link';
-        link.href = `${PORTAL_PLAYER_URL_BASE}${row.portalId}`;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.title = `Open ${row.name}'s Portal profile`;
-        link.textContent = row.name;
-        // Without this, the click would also bubble to the row's own listener below and
-        // toggle the detail row open/closed at the same moment a new tab opens -- confusing
-        // and unnecessary, since opening the profile is a complete action on its own.
-        link.addEventListener('click', (event) => event.stopPropagation());
-        td.appendChild(link);
-      } else {
-        td.textContent = row.name;
-      }
-      tr.appendChild(td);
+      tr.appendChild(buildNameCell(row));
       continue;
     }
 
+    const td = document.createElement('td');
+    if (column.align === 'right') td.classList.add('num');
+    if (column.key === 'rank') td.classList.add('rank-cell');
+    if (column.key === 'gir') td.classList.add('pir-cell');
+    if (column.key === 'mvmt') td.classList.add(movementClass(row));
     td.textContent = cells[column.key];
     tr.appendChild(td);
   }
@@ -800,17 +1152,24 @@ function renderRow(row, columns) {
 }
 
 function renderTable() {
+  const isGoalieMode = state.mode === 'goalies';
   const allPlayers = state.ranking?.players ?? [];
-  const columns = buildColumns(Boolean(state.ranking?.meta?.window), hasVariedStatus(allPlayers));
+  const columns = isGoalieMode
+    ? buildGoalieColumns(Boolean(state.ranking?.meta?.window), hasVariedStatus(allPlayers))
+    : buildColumns(Boolean(state.ranking?.meta?.window), hasVariedStatus(allPlayers));
   renderTableHead(columns);
   clearChildren(el.boardBody);
 
-  const filtered = filterRows(allPlayers, { query: state.filterQuery, position: state.filterPosition });
+  // Goalie mode never applies a position filter (every row is position 'G'; the position chips
+  // are hidden entirely -- see updateModeVisibility), so 'ALL' is passed regardless of whatever
+  // state.filterPosition happens to hold from skater mode.
+  const filtered = filterRows(allPlayers, { query: state.filterQuery, position: isGoalieMode ? 'ALL' : state.filterPosition });
   const sorted = sortRows(filtered, { key: state.sortKey, direction: state.sortDirection });
   const limited = state.topLimit === 'all' ? sorted : sorted.slice(0, Number(state.topLimit));
 
+  const noun = isGoalieMode ? 'goalies' : 'skaters';
   el.countReadout.textContent = state.ranking
-    ? `Showing ${limited.length} of ${allPlayers.length} skaters`
+    ? `Showing ${limited.length} of ${allPlayers.length} ${noun}`
     : '';
 
   // Checked in this order deliberately: "nothing has ever been captured" must win over "the
@@ -834,14 +1193,14 @@ function renderTable() {
 
   const fragment = document.createDocumentFragment();
   for (const row of limited) {
-    fragment.appendChild(renderRow(row, columns));
+    fragment.appendChild(isGoalieMode ? renderGoalieRow(row, columns) : renderRow(row, columns));
     if (state.expandedId === row.id) {
       const detailTr = document.createElement('tr');
       detailTr.className = 'detail-row';
       const td = document.createElement('td');
       td.className = 'detail-cell';
       td.colSpan = columns.length;
-      td.appendChild(buildDetailGrid(row));
+      td.appendChild(isGoalieMode ? buildGoalieDetailGrid(row) : buildDetailGrid(row));
       detailTr.appendChild(td);
       fragment.appendChild(detailTr);
     }
@@ -854,13 +1213,20 @@ function showEmptyState(kind) {
   el.emptyState.classList.remove('hidden');
   clearChildren(el.emptyState);
 
+  const noun = state.mode === 'goalies' ? 'goalies' : 'skaters';
+  const singularNoun = state.mode === 'goalies' ? 'goalie' : 'skater';
+
   if (kind === 'filter-no-match') {
-    el.emptyState.appendChild(textEl('p', null, 'No skaters match this filter.'));
+    el.emptyState.appendChild(textEl('p', null, `No ${noun} match this filter.`));
     return;
   }
 
   if (kind === 'no-ranking') {
     if (state.localCapture) {
+      // `update` always captures both players and goalies together (see src/goalieCommands.js's
+      // header comment), so the SAME suggested command is correct regardless of mode -- a
+      // goalie-mode "no ranking" empty state is never telling the user to run a different command
+      // than the skater one would.
       const suggestion = `node index.js update --league=${state.league}${state.season !== undefined ? ` --season=${state.season}` : ''}`;
       el.emptyState.appendChild(textEl('p', null, 'No snapshot captured yet for this league/season.'));
       el.emptyState.appendChild(textEl('code', 'empty-state-cmd', suggestion));
@@ -871,9 +1237,9 @@ function showEmptyState(kind) {
   }
 
   // kind === 'no-snapshot-or-empty': a ranking WAS loaded (state.ranking is truthy here -- see
-  // renderTable's guard order), but every skater in it was excluded from scoring or filtered
-  // out by a --status option (see the excluded banner above for the per-player breakdown).
-  el.emptyState.appendChild(textEl('p', null, 'Every skater in this snapshot was excluded from scoring or filtered out (see above).'));
+  // renderTable's guard order), but every row in it was excluded from scoring or filtered out by
+  // a --status option (see the excluded banner above for the per-row breakdown).
+  el.emptyState.appendChild(textEl('p', null, `Every ${singularNoun} in this snapshot was excluded from scoring or filtered out (see above).`));
 }
 
 // ---------------------------------------------------------------------------
@@ -916,6 +1282,11 @@ function debounce(fn, delayMs) {
 }
 
 function wireEvents() {
+  el.liveRefreshButton.addEventListener('click', () => {
+    lastFailedAction = runLiveRefresh;
+    runLiveRefresh();
+  });
+
   el.captureButton.addEventListener('click', () => {
     lastFailedAction = () => runCapture(state.season);
     runCapture(state.season);
@@ -958,14 +1329,18 @@ function wireEvents() {
   el.shrinkInput.addEventListener(
     'change',
     debounce(() => {
+      // Writes to whichever of the two shrinkage fields matches the CURRENT mode -- see state's
+      // own comment for why skater (minutes) and goalie (shots) shrinkage are never allowed to
+      // share one field.
+      const stateKey = state.mode === 'goalies' ? 'shrinkageShots' : 'shrinkageMinutes';
       const raw = el.shrinkInput.value.trim();
       if (raw === '') {
-        state.shrinkageMinutes = null;
+        state[stateKey] = null;
         loadRanking();
         return;
       }
       const value = Number(raw);
-      state.shrinkageMinutes = Number.isFinite(value) && value >= 0 ? value : null;
+      state[stateKey] = Number.isFinite(value) && value >= 0 ? value : null;
       loadRanking();
     }, 150),
   );
@@ -1003,6 +1378,8 @@ function wireEvents() {
 
 async function init() {
   wireEvents();
+  renderModeChips();
+  updateModeVisibility();
   renderBaselineChips();
   renderPositionChips();
   state.league = LEAGUES[0]?.id ?? 0;
