@@ -1,1 +1,6 @@
 node_modules/
+
+# Captured snapshots are local working data, not source -- see README's "Data store" section.
+# A one-click capture in the web control panel makes re-capturing trivial, so nothing here is
+# irreplaceable; keeping it out of history avoids commit churn on every click.
+data/

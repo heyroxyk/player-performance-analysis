@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
+
 import { fetchPlayerStats, fetchPlayerRatings } from './shlClient.js';
-import { readCurrent, rotateAndWrite } from './store.js';
+import { readLatest, writeCapture } from './store.js';
 
 // The ONLY players/stats fields persisted per skater. Everything else the raw
 // API returns is one re-fetch away if a future feature ever needs it, which
@@ -60,30 +62,82 @@ async function isSeasonFinished(_params) {
 export const defaultDeps = {
   fetchPlayerStats,
   fetchPlayerRatings,
-  readCurrent,
-  rotateAndWrite,
+  readLatest,
+  writeCapture,
   isSeasonFinished,
 };
 
+// The raw players/stats rows each carry the season they belong to (see
+// test/fixtures.js makePlayerStatsRow). Resolving the season from the API's own answer --
+// rather than trusting the caller's possibly-omitted `season` argument -- is what makes a
+// capture self-describing: the stored snapshot always knows which season it holds, even when
+// `update` was run with no --season at all. Throws instead of guessing when the rows disagree,
+// carry no season, or contradict an explicitly requested one: silently mislabeling a capture
+// is exactly the bug this exists to prevent.
+function resolveSeason(statsRows, requestedSeason) {
+  const seasonsInRows = new Set(statsRows.map((row) => row.season));
+
+  if (seasonsInRows.size === 0) {
+    if (requestedSeason !== undefined) return requestedSeason;
+    throw new Error('Cannot resolve season: the API returned zero player rows and no --season was given');
+  }
+
+  if (seasonsInRows.size > 1) {
+    throw new Error(`Cannot resolve season: player rows disagree on season (${[...seasonsInRows].join(', ')})`);
+  }
+
+  const [apiSeason] = seasonsInRows;
+  if (apiSeason === undefined) {
+    throw new Error('Cannot resolve season: player rows carry no season field');
+  }
+
+  if (requestedSeason !== undefined && requestedSeason !== apiSeason) {
+    throw new Error(`Requested season ${requestedSeason} but the API returned season ${apiSeason} rows`);
+  }
+
+  return apiSeason;
+}
+
 /**
- * Captures the current season-to-date skater stats + ratings from the live
- * API, trims each row, and persists the result as the new "current" snapshot
- * (rotating whatever was current into "previous" -- see store.js). Skips the
- * network entirely for a season that's both finished and already captured,
- * since a finished season's stats can never change again.
+ * A stable fingerprint of a snapshot's player data, independent of array order -- two captures
+ * with the same fingerprint describe the same league state, so the second one adds nothing but
+ * a file (and, per store.js's findAnchorCapture, a candidate window anchor that would resolve
+ * to a zero-game span). Order-insensitive by design: the API's row ordering has been stable
+ * across every real capture pair seen so far, but that isn't a contractual guarantee, and a
+ * re-sort must never register as a "change". Sorting by id before stringifying is safe
+ * regardless of key order, since trimPlayerRow always builds its keys from the same fixed
+ * STORED_STAT_FIELDS list.
+ * @param {Array<object>} players
+ * @returns {string}
+ */
+export function playersFingerprint(players) {
+  const sortedById = [...players].sort((a, b) => a.id - b.id);
+  return createHash('sha256').update(JSON.stringify(sortedById)).digest('hex');
+}
+
+/**
+ * Captures the current season-to-date skater stats + ratings from the live API, trims each
+ * row, resolves the season the capture actually belongs to, and persists it as a new,
+ * self-describing capture (see store.js -- captures are additive, never overwritten). Skips
+ * writing (with a distinct `reason`) in two cases: a season that's both finished and already
+ * captured, since a finished season's stats can never change again; and a capture that's
+ * byte-for-byte identical to the one already on disk, which happens routinely on a daily
+ * capture schedule between game days. Neither skip avoids the network round trip -- there's no
+ * way to know the data is unchanged without fetching it -- so this saves disk and git-history
+ * churn, never an API call.
  * @param {{league: number, season?: number}} params
  * @param {typeof defaultDeps} deps
  * @param {string | URL} [dataDirUrl]
- * @returns {Promise<{skipped: boolean, snapshot: object}>}
+ * @returns {Promise<{skipped: boolean, reason?: 'season-finished' | 'unchanged', snapshot: object}>}
  */
 export async function captureSnapshot({ league, season }, deps = defaultDeps, dataDirUrl) {
-  // Checking isSeasonFinished before touching disk avoids a wasted readCurrent
+  // Checking isSeasonFinished before touching disk avoids a wasted readLatest
   // call on the (currently universal, per the v1 stub above) common case where
   // the season isn't finished.
   if (season !== undefined && (await deps.isSeasonFinished({ league, season }))) {
-    const existingSnapshot = await deps.readCurrent({ league, season }, dataDirUrl);
+    const existingSnapshot = await deps.readLatest({ league, season }, dataDirUrl);
     if (existingSnapshot) {
-      return { skipped: true, snapshot: existingSnapshot };
+      return { skipped: true, reason: 'season-finished', snapshot: existingSnapshot };
     }
   }
 
@@ -92,11 +146,18 @@ export async function captureSnapshot({ league, season }, deps = defaultDeps, da
     deps.fetchPlayerRatings({ league, season }),
   ]);
 
+  const resolvedSeason = resolveSeason(statsRows, season);
+
   const appliedTpeById = new Map(ratingsRows.map((row) => [row.id, row.appliedTPE]));
   const players = statsRows.map((row) => trimPlayerRow(row, appliedTpeById.get(row.id) ?? null));
 
-  const snapshot = { league, season, capturedAt: new Date().toISOString(), players };
-  await deps.rotateAndWrite({ league, season, snapshot }, dataDirUrl);
+  const existingSnapshot = await deps.readLatest({ league, season: resolvedSeason }, dataDirUrl);
+  if (existingSnapshot && playersFingerprint(existingSnapshot.players) === playersFingerprint(players)) {
+    return { skipped: true, reason: 'unchanged', snapshot: existingSnapshot };
+  }
+
+  const snapshot = { league, season: resolvedSeason, capturedAt: new Date().toISOString(), players };
+  await deps.writeCapture({ league, season: resolvedSeason, snapshot }, dataDirUrl);
 
   return { skipped: false, snapshot };
 }

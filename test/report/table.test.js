@@ -15,6 +15,7 @@ function makeRow(overrides = {}) {
     timeOnIce: 1230,
     appliedTPE: 350,
     pir: 1.5,
+    totalImpact: 30.75,
     components: {},
     ...overrides,
   };
@@ -81,4 +82,35 @@ test('formatTable prints an optional header string above the table', () => {
   const output = formatTable([makeRow()], { header: 'Week 5 Rankings' });
 
   assert.ok(output.startsWith('Week 5 Rankings\n\n'));
+});
+
+// A window row (see src/pir/window.js) is a season row plus a few additive provenance
+// fields -- seasonGamesPlayed is the one this module sniffs to tell the two apart.
+function makeWindowRow(overrides = {}) {
+  return makeRow({ seasonGamesPlayed: 40, seasonTimeOnIce: 48000, windowToiFraction: 0.25, ...overrides });
+}
+
+test('formatTable labels GP/TOI as window-scoped and adds a Season GP column when window data is present', () => {
+  const output = formatTable([makeWindowRow({ name: 'Windowed', gamesPlayed: 10, timeOnIce: 12000 })]);
+  const lines = output.split('\n');
+  const headerLine = lines[0];
+
+  assert.ok(headerLine.includes('GP (win)'), 'GP column should be labelled as window-scoped');
+  assert.ok(headerLine.includes('TOI (win)'), 'TOI column should be labelled as window-scoped');
+  assert.ok(headerLine.includes('Season GP'), 'a Season GP column should appear');
+  const columnLabels = headerLine.split(/ {2,}/);
+  assert.ok(!columnLabels.includes('GP'), 'the bare "GP" label must not also appear alongside "GP (win)"');
+  assert.ok(!columnLabels.includes('TOI'), 'the bare "TOI" label must not also appear alongside "TOI (win)"');
+
+  for (const line of lines) {
+    assert.equal(line.length, headerLine.length, `line "${line}" should match header width`);
+  }
+});
+
+test('formatTable never labels GP/TOI as window-scoped when no row carries window data', () => {
+  const output = formatTable([makeRow()]);
+  const headerLine = output.split('\n')[0];
+
+  assert.ok(!headerLine.includes('(win)'));
+  assert.ok(!headerLine.includes('Season GP'));
 });

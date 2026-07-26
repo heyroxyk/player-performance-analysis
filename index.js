@@ -1,27 +1,28 @@
 // CLI entry point: two subcommands, `update` (fetch + persist a snapshot) and
 // `rank` (score the stored snapshot into a PIR leaderboard). All I/O-touching
 // work is delegated through a `deps` object so tests can swap in plain fake
-// functions -- see test/index.test.js -- without a mocking library.
+// functions -- see test/index.test.js -- without a mocking library. The actual
+// update/rank orchestration lives in src/commands.js, shared with the web control panel, so
+// this file is CLI presentation (flag parsing, console output, file writes) only.
 
-import { writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { captureSnapshot, computeMovement } from './src/snapshot.js';
-import { readCurrent, readPrevious } from './src/store.js';
-import { filterScoreableRows, computePir, rankByPir } from './src/pir/pirEngine.js';
-import { POSITION_GROUPS } from './src/pir/components.js';
-import { formatTable } from './src/report/table.js';
-import { toJson } from './src/report/jsonWriter.js';
-import { toCsv } from './src/report/csvWriter.js';
+import {
+  defaultDeps,
+  captureUpdate,
+  getRanking,
+  formatRanking,
+  VALID_LEAGUES,
+  VALID_BASELINES,
+  VALID_FORMATS,
+  parseNonNegativeInteger,
+} from './src/commands.js';
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
 // ---------------------------------------------------------------------------
 
 const SUBCOMMANDS = new Set(['update', 'rank']);
-const VALID_LEAGUES = new Set([0, 1, 2, 3]);
-const VALID_BASELINES = new Set(['league', 'position']);
-const VALID_FORMATS = new Set(['table', 'json', 'csv']);
 
 function usageError(message) {
   return new Error(`Usage error: ${message}`);
@@ -36,23 +37,14 @@ function splitFlag(arg) {
   return { flag: arg.slice(2, separatorIndex), value: arg.slice(separatorIndex + 1) };
 }
 
-// Matches a bare non-negative integer literal only -- no sign, no decimal point, no
-// leading/trailing junk. Number.parseInt alone is NOT safe for --league/--season/--top:
-// it silently truncates "89abc" down to 89 and coerces pure garbage like "../.." to NaN
-// rather than rejecting it outright. --league and --season both flow straight into a
-// filesystem path in store.js (`league-${league}/season-${season}`), so an unvalidated
-// value reaching that join would be a real path-safety bug, not just a display glitch.
-const INTEGER_LITERAL_PATTERN = /^\d+$/;
-
-// Parses a CLI flag's raw string value into a plain non-negative integer, throwing a
-// usage error for anything that doesn't cleanly match (letters, negative signs,
-// decimals, or empty strings). Shared by --league, --season, and --top so all three
-// reject bad input the same loud way instead of quietly becoming NaN.
-function parseNonNegativeInteger(flag, value) {
-  if (!INTEGER_LITERAL_PATTERN.test(value)) {
-    throw usageError(`--${flag} must be a non-negative integer, got "${value}"`);
+// Wraps the shared integer parser's error in a "Usage error: " prefix, matching every other
+// rejection parseArgs produces for a bad flag.
+function parseIntegerFlag(flag, value) {
+  try {
+    return parseNonNegativeInteger(`--${flag}`, value);
+  } catch (error) {
+    throw usageError(error.message);
   }
-  return Number.parseInt(value, 10);
 }
 
 /**
@@ -77,6 +69,11 @@ export function parseArgs(argv) {
   let top = Infinity;
   let format = 'table';
   let out;
+  // Deliberately undefined, not DEFAULT_SHRINKAGE_MINUTES -- "omitted" has to survive all the
+  // way down to buildRanking, which resolves it ADAPTIVELY (scaled to sample depth) rather
+  // than to a fixed constant. Collapsing it to a literal here would silently disable that.
+  let shrink;
+  let windowGames;
 
   for (const arg of flagArgs) {
     if (arg === '--no-movement') {
@@ -90,22 +87,28 @@ export function parseArgs(argv) {
 
     switch (flag) {
       case 'league':
-        league = parseNonNegativeInteger('league', value);
+        league = parseIntegerFlag('league', value);
         break;
       case 'season':
-        season = parseNonNegativeInteger('season', value);
+        season = parseIntegerFlag('season', value);
         break;
       case 'baseline':
         baseline = value;
         break;
       case 'top':
-        top = parseNonNegativeInteger('top', value);
+        top = parseIntegerFlag('top', value);
         break;
       case 'format':
         format = value;
         break;
       case 'out':
         out = value;
+        break;
+      case 'shrink':
+        shrink = parseIntegerFlag('shrink', value);
+        break;
+      case 'window':
+        windowGames = parseIntegerFlag('window', value);
         break;
       default:
         throw usageError(`unrecognized flag "--${flag}"`);
@@ -121,124 +124,64 @@ export function parseArgs(argv) {
   if (!VALID_FORMATS.has(format)) {
     throw usageError(`--format must be one of "table", "json", "csv", got "${format}"`);
   }
+  // parseNonNegativeInteger accepts 0, but a zero-game window is meaningless -- reject it here
+  // rather than let it reach findAnchorCapture, where it would read as "no window at all".
+  if (windowGames !== undefined && windowGames < 1) {
+    throw usageError('--window must be at least 1 game');
+  }
 
-  return { command, league, season, baseline, movement, top, format, out };
+  return { command, league, season, baseline, movement, top, format, out, shrinkageMinutes: shrink, windowGames };
 }
-
-// ---------------------------------------------------------------------------
-// Dependency injection
-// ---------------------------------------------------------------------------
-
-// Real implementations wired together for production use. Every function main()
-// calls arrives through this object rather than a direct import, so tests can
-// substitute plain fake functions (see test/index.test.js) with no mocking library.
-const defaultDeps = {
-  captureSnapshot,
-  readCurrent,
-  readPrevious,
-  filterScoreableRows,
-  computePir,
-  rankByPir,
-  computeMovement,
-  formatTable,
-  toJson,
-  toCsv,
-  writeFile,
-  POSITION_GROUPS,
-};
 
 // ---------------------------------------------------------------------------
 // update
 // ---------------------------------------------------------------------------
 
-async function runUpdate({ league, season }, deps) {
-  const { skipped, snapshot } = await deps.captureSnapshot({ league, season });
-  const seasonLabel = snapshot?.season ?? season ?? 'current';
+async function runUpdate(args, deps) {
+  const result = await captureUpdate(args, deps);
 
-  if (skipped) {
+  if (result.skipped) {
+    if (result.reason === 'unchanged') {
+      // The fetch still happened -- this only saves the write, not the API call -- so the
+      // message says "no new data", not "skipped", to avoid implying the network was avoided.
+      console.log(
+        `Update fetched league ${result.league} season ${result.season}: no new data since the last capture, nothing written.`
+      );
+      return;
+    }
+
     // A finished season's stats never change again, so re-capturing it would just
     // burn an API call to write back the exact same numbers already on disk.
     console.log(
-      `Update skipped: league ${league} season ${seasonLabel} is already finished and was already captured.`
+      `Update skipped: league ${result.league} season ${result.season} is already finished and was already captured.`
     );
     return;
   }
 
-  console.log(`Captured ${snapshot.players.length} players for league ${league} season ${seasonLabel}.`);
+  console.log(`Captured ${result.playerCount} players for league ${result.league} season ${result.season}.`);
 }
 
 // ---------------------------------------------------------------------------
 // rank
 // ---------------------------------------------------------------------------
 
-function buildUpdateSuggestion({ league, season }) {
-  const seasonFlag = season === undefined ? '' : ` --season=${season}`;
-  return `node index.js update --league=${league}${seasonFlag}`;
-}
+async function runRank(args, deps) {
+  const { ranked, meta, excluded } = await getRanking(args, deps);
 
-// Runs the shared filter -> score -> rank pipeline against one snapshot's players.
-// Pulled into its own function so the current and previous snapshots (when movement
-// is enabled) are always scored by identical rules -- any divergence there would
-// make the resulting movement deltas meaningless, since they'd be comparing
-// rankings built two different ways.
-function scoreSnapshotPlayers(players, { groupBy, deps, logExclusions }) {
-  const { usable, excluded } = deps.filterScoreableRows(players);
+  for (const { row, reason } of excluded) {
+    console.error(`Excluded ${row.name} from ranking: ${reason}`);
+  }
 
-  if (logExclusions) {
-    for (const { row, reason } of excluded) {
-      console.error(`Excluded ${row.name} from ranking: ${reason}`);
+  if (meta.window) {
+    for (const warning of meta.window.warnings) {
+      console.error(`Window warning: ${warning}`);
     }
   }
 
-  return deps.rankByPir(deps.computePir(usable, { groupBy }));
-}
+  const output = formatRanking(ranked, { format: args.format, top: args.top, meta }, deps);
 
-// Scores the current snapshot, then folds in movement against the previous
-// snapshot when requested and available. Previous-snapshot exclusions are not
-// re-logged to console.error: those players were already reported the last time
-// that snapshot was itself the "current" one being ranked.
-async function buildRanking({ league, season, baseline, movement }, current, deps) {
-  const groupBy = baseline === 'position' ? (row) => deps.POSITION_GROUPS[row.position] : null;
-  const ranked = scoreSnapshotPlayers(current.players, { groupBy, deps, logExclusions: true });
-
-  if (!movement) return ranked;
-
-  const previous = await deps.readPrevious({ league, season });
-  if (previous === null) return ranked;
-
-  const previousRanked = scoreSnapshotPlayers(previous.players, { groupBy, deps, logExclusions: false });
-  return deps.computeMovement(ranked, previousRanked);
-}
-
-function formatRanking(ranked, { format, top, meta }, deps) {
-  if (format === 'json') return deps.toJson(ranked, { top, meta });
-  if (format === 'csv') return deps.toCsv(ranked, { top });
-
-  // meta.season is undefined when the snapshot was captured without an explicit
-  // --season (the "current season" mode) -- falling back to the word "current" here
-  // avoids a header that literally reads "Season undefined".
-  const seasonLabel = meta.season ?? 'current';
-  const header = `League ${meta.league} / Season ${seasonLabel} / Baseline: ${meta.baseline} / Captured: ${meta.capturedAt}`;
-  return deps.formatTable(ranked, { top, header });
-}
-
-async function runRank(args, deps) {
-  const { league, season, baseline, top, format, out } = args;
-
-  const current = await deps.readCurrent({ league, season });
-  if (current === null) {
-    throw new Error(
-      `No snapshot found for league ${league}, season ${season ?? 'current'}. ` +
-      `Run "${buildUpdateSuggestion({ league, season })}" first.`
-    );
-  }
-
-  const ranked = await buildRanking(args, current, deps);
-  const meta = { league, season: current.season, baseline, capturedAt: current.capturedAt };
-  const output = formatRanking(ranked, { format, top, meta }, deps);
-
-  if (out) {
-    await deps.writeFile(out, output);
+  if (args.out) {
+    await deps.writeFile(args.out, output);
     return;
   }
 
