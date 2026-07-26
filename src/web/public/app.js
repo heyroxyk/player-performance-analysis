@@ -49,29 +49,60 @@ const deps = createBrowserCommandDeps({ store });
 // src/report/table.js's own hasVariedStatus) only appears when the current rows actually carry
 // more than one distinct status -- a leaderboard already filtered to one status would show the
 // same word on every row.
+// title strings become each header cell's native hover tooltip (see renderTableHead) -- most
+// column labels here are abbreviations or jargon (PIR, TPE, Mvmt, TOI...) with no room to spell
+// out in a header row, so a tooltip is the only place that explanation can live without either
+// widening every column or repeating a paragraph the user has to scroll past.
 function buildColumns(isWindow, isStatus) {
   const columns = [
     { key: 'rank', label: 'Rank', align: 'right', sortable: false },
-    { key: 'mvmt', label: 'Mvmt', align: 'left', sortable: false },
+    {
+      key: 'mvmt', label: 'Mvmt', align: 'left', sortable: false,
+      title: 'Change in rank since the previous capture -- ^N climbed N spots, vN fell N spots, NEW means not in the previous capture, - means unchanged. Unavailable in window mode.',
+    },
     { key: 'name', label: 'Player', align: 'left', sortable: true },
     { key: 'position', label: 'Pos', align: 'left', sortable: true },
     { key: 'team', label: 'Team', align: 'left', sortable: true },
   ];
   if (isStatus) {
-    columns.push({ key: 'status', label: 'Status', align: 'left', sortable: true });
+    columns.push({
+      key: 'status', label: 'Status', align: 'left', sortable: true,
+      title: "Player activity status from the Portal (a separate system from the league API), joined by exact name match. 'unknown' means no confident match was found.",
+    });
   }
   columns.push(
-    { key: 'gamesPlayed', label: isWindow ? 'GP (win)' : 'GP', align: 'right', sortable: true },
-    { key: 'timeOnIce', label: isWindow ? 'TOI (win)' : 'TOI', align: 'right', sortable: true },
+    {
+      key: 'gamesPlayed', label: isWindow ? 'GP (win)' : 'GP', align: 'right', sortable: true,
+      title: isWindow ? 'Games played within this rolling window (see the Window control).' : 'Games played this season.',
+    },
+    {
+      key: 'timeOnIce', label: isWindow ? 'TOI (win)' : 'TOI', align: 'right', sortable: true,
+      title: isWindow ? 'Time on ice within this rolling window (MM:SS).' : 'Time on ice this season (MM:SS).',
+    },
   );
   if (isWindow) {
-    columns.push({ key: 'seasonGamesPlayed', label: 'Season GP', align: 'right', sortable: true });
+    columns.push({
+      key: 'seasonGamesPlayed', label: 'Season GP', align: 'right', sortable: true,
+      title: 'Games played all season, for comparison against the window-scoped GP column to the left.',
+    });
   }
   columns.push(
-    { key: 'pir', label: 'PIR', align: 'right', sortable: true },
-    { key: 'pirDelta', label: 'PIR +/-', align: 'right', sortable: false },
-    { key: 'totalImpact', label: 'Total', align: 'right', sortable: true },
-    { key: 'appliedTPE', label: 'TPE', align: 'right', sortable: true },
+    {
+      key: 'pir', label: 'PIR', align: 'right', sortable: true,
+      title: 'Player Impact above Replacement -- a weighted z-score composite across 8 stats, scored against a replacement-level baseline (not a league-average one). Higher is better.',
+    },
+    {
+      key: 'pirDelta', label: 'PIR +/-', align: 'right', sortable: false,
+      title: 'Change in PIR since the previous capture.',
+    },
+    {
+      key: 'totalImpact', label: 'Total', align: 'right', sortable: true,
+      title: "PIR multiplied by hours actually played -- accumulated impact this season. PIR alone is a rate, so it can't tell a hot small sample apart from a durable full-season contributor; Total answers \"how much impact has this player delivered\" alongside PIR's \"how good is this player right now\".",
+    },
+    {
+      key: 'appliedTPE', label: 'TPE', align: 'right', sortable: true,
+      title: "Total earned experience points invested in this player's build. Not an input to PIR -- PIR measures realized on-ice impact, not invested development resources. Shown for reference only.",
+    },
   );
   return columns;
 }
@@ -224,6 +255,7 @@ function renderChips(container, options, activeValue, onSelect) {
     button.textContent = option.label;
     button.setAttribute('role', 'radio');
     button.setAttribute('aria-checked', String(option.value === activeValue));
+    if (option.title) button.title = option.title;
     button.addEventListener('click', () => onSelect(option.value));
     container.appendChild(button);
   }
@@ -241,8 +273,11 @@ function renderLeagueChips() {
 
 function renderBaselineChips() {
   const options = [
-    { value: 'league', label: 'League-wide' },
-    { value: 'position', label: 'Position (F vs D)' },
+    { value: 'league', label: 'League-wide', title: 'Every skater is scored against one shared league-wide population.' },
+    {
+      value: 'position', label: 'Position (F vs D)',
+      title: 'Forwards are scored only against other forwards, defensemen only against other defensemen -- corrects for a league-wide baseline structurally favoring forwards (D naturally post lower Points/60 and higher Blocks/60).',
+    },
   ];
   renderChips(el.baselineChips, options, state.baseline, (value) => {
     state.baseline = value;
@@ -614,6 +649,7 @@ function renderTableHead(columns) {
   for (const column of columns) {
     const th = document.createElement('th');
     if (column.align === 'right') th.classList.add('num');
+    if (column.title) th.title = column.title;
 
     if (!column.sortable) {
       const span = textEl('span', null, column.label);
