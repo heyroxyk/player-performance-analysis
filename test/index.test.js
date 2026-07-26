@@ -33,8 +33,14 @@ function makeSnapshot(overrides = {}) {
 function makeFakeDeps(overrides = {}) {
   return {
     captureSnapshot: trackCalls(async () => ({ skipped: false, snapshot: makeSnapshot() })),
-    readCurrent: trackCalls(async () => makeSnapshot()),
+    readLatest: trackCalls(async () => makeSnapshot()),
     readPrevious: trackCalls(async () => null),
+    findAnchorCapture: trackCalls(async () => ({ anchor: null, reason: 'only one capture on disk -- a window needs at least two' })),
+    buildWindowRows: trackCalls(() => ({ rows: [], dropped: [], summary: {} })),
+    evaluateWindowQuality: trackCalls(({ anchorReason } = {}) => (
+      anchorReason ? { blockers: [anchorReason], warnings: [] } : { blockers: [], warnings: [] }
+    )),
+    adaptiveShrinkageMinutes: trackCalls(() => 400),
     filterScoreableRows: trackCalls((players) => ({ usable: players, excluded: [] })),
     computePir: trackCalls((rows) => rows.map((row) => ({ ...row, pir: 1.5 }))),
     rankByPir: trackCalls((rows) => rows),
@@ -81,6 +87,11 @@ test('parseArgs parses an update command with league and season', () => {
     top: Infinity,
     format: 'table',
     out: undefined,
+    // Deliberately undefined, not a literal 400 -- "omitted" has to survive down to
+    // buildRanking, which resolves it ADAPTIVELY when the caller didn't ask for a specific
+    // value. Collapsing it to a constant here would silently disable that.
+    shrinkageMinutes: undefined,
+    windowGames: undefined,
   });
 });
 
@@ -94,6 +105,8 @@ test('parseArgs parses a rank command with every flag set', () => {
     '--top=10',
     '--format=json',
     '--out=rankings.json',
+    '--shrink=200',
+    '--window=12',
   ]);
   assert.deepEqual(args, {
     command: 'rank',
@@ -104,10 +117,12 @@ test('parseArgs parses a rank command with every flag set', () => {
     top: 10,
     format: 'json',
     out: 'rankings.json',
+    shrinkageMinutes: 200,
+    windowGames: 12,
   });
 });
 
-test('parseArgs applies defaults for baseline, movement, top, format, and out when omitted', () => {
+test('parseArgs applies defaults for baseline, movement, top, format, out, shrink, and window when omitted', () => {
   const args = parseArgs(['rank', '--league=0']);
   assert.equal(args.baseline, 'league');
   assert.equal(args.movement, true);
@@ -115,6 +130,40 @@ test('parseArgs applies defaults for baseline, movement, top, format, and out wh
   assert.equal(args.format, 'table');
   assert.equal(args.out, undefined);
   assert.equal(args.season, undefined);
+  assert.equal(args.shrinkageMinutes, undefined);
+  assert.equal(args.windowGames, undefined);
+});
+
+test('parseArgs throws on a non-numeric --shrink instead of silently producing NaN', () => {
+  assert.throws(
+    () => parseArgs(['rank', '--league=1', '--shrink=abc']),
+    /--shrink must be a non-negative integer/,
+  );
+});
+
+test('parseArgs accepts --shrink=0 and leaves it exactly 0, not undefined', () => {
+  // 0 is a legitimate (if extreme) explicit choice -- "no shrinkage at all" -- and must be
+  // distinguishable from "omitted" downstream, where buildRanking uses ?? specifically so 0
+  // survives untouched instead of triggering adaptive resolution.
+  assert.equal(parseArgs(['rank', '--league=1', '--shrink=0']).shrinkageMinutes, 0);
+});
+
+test('parseArgs parses --window into windowGames', () => {
+  assert.equal(parseArgs(['rank', '--league=1', '--window=12']).windowGames, 12);
+});
+
+test('parseArgs throws on a non-numeric --window instead of silently producing NaN', () => {
+  assert.throws(
+    () => parseArgs(['rank', '--league=1', '--window=abc']),
+    /--window must be a non-negative integer/,
+  );
+});
+
+test('parseArgs rejects --window=0 as meaningless, rather than passing it through', () => {
+  assert.throws(
+    () => parseArgs(['rank', '--league=1', '--window=0']),
+    /--window must be at least 1 game/,
+  );
 });
 
 test('parseArgs sets movement to false only when --no-movement is passed', () => {
@@ -212,12 +261,23 @@ test('main update prints a skipped summary when the season was already finished 
   assert.ok(logs.some((line) => line.toLowerCase().includes('skipped')));
 });
 
+test('main update reports "no new data" rather than "skipped" for an unchanged capture, since the fetch still happened', async () => {
+  const deps = makeFakeDeps({
+    captureSnapshot: trackCalls(async () => ({ skipped: true, reason: 'unchanged', snapshot: makeSnapshot() })),
+  });
+
+  const { logs } = await withCapturedConsole(() => main(['update', '--league=1', '--season=89'], deps));
+
+  assert.ok(logs.some((line) => line.includes('no new data')));
+  assert.ok(!logs.some((line) => line.toLowerCase().includes('skipped')), 'must not say "skipped" -- the network call was NOT avoided, only the write was');
+});
+
 // ---------------------------------------------------------------------------
 // main() - rank
 // ---------------------------------------------------------------------------
 
 test('main rank throws an actionable error and calls no scoring/report deps when no current snapshot exists', async () => {
-  const deps = makeFakeDeps({ readCurrent: trackCalls(async () => null) });
+  const deps = makeFakeDeps({ readLatest: trackCalls(async () => null) });
 
   await assert.rejects(
     () => main(['rank', '--league=1', '--season=89'], deps),
@@ -236,7 +296,7 @@ test('main rank throws an actionable error and calls no scoring/report deps when
 });
 
 test('main rank error message omits a --season flag when none was passed', async () => {
-  const deps = makeFakeDeps({ readCurrent: trackCalls(async () => null) });
+  const deps = makeFakeDeps({ readLatest: trackCalls(async () => null) });
 
   await assert.rejects(() => main(['rank', '--league=2'], deps), (error) => {
     assert.match(error.message, /update --league=2/);
@@ -328,6 +388,25 @@ test('main rank logs each excluded player and its reason to console.error', asyn
   assert.ok(errors.some((line) => line.includes('Bench Warmer') && line.includes('no ice time')));
 });
 
+test('main rank --window=12 prints window quality warnings to console.error alongside exclusions', async () => {
+  const deps = makeFakeDeps({
+    findAnchorCapture: trackCalls(async () => ({ anchor: makeSnapshot(), reason: null, resolvedGames: 9 })),
+    buildWindowRows: trackCalls(() => ({
+      rows: [{ id: 1, timeOnIce: 1000, gamesPlayed: 5 }],
+      dropped: [],
+      summary: {
+        medianToiFraction: 0.2, playerCount: 1, droppedCount: 0, callUpCount: 0,
+        anchorCapturedAt: '2026-07-01T12:00:00.000Z', medianWindowGamesPlayed: 5, medianWindowTimeOnIce: 1000, tradedCount: 0,
+      },
+    })),
+    evaluateWindowQuality: trackCalls(() => ({ blockers: [], warnings: ['Net Goals/60 will be noisier than usual'] })),
+  });
+
+  const { errors } = await withCapturedConsole(() => main(['rank', '--league=1', '--window=12'], deps));
+
+  assert.ok(errors.some((line) => line.includes('Net Goals/60 will be noisier than usual')));
+});
+
 test('main rank builds a position-based groupBy function from POSITION_GROUPS when --baseline=position', async () => {
   const deps = makeFakeDeps();
 
@@ -347,24 +426,13 @@ test('main rank passes a null groupBy when --baseline=league (the default)', asy
   assert.equal(options.groupBy, null);
 });
 
-test('main rank table header reads "Season current" rather than "Season undefined" when no season was captured', async () => {
-  const deps = makeFakeDeps({
-    readCurrent: trackCalls(async () => makeSnapshot({ season: undefined })),
-  });
-
-  await withCapturedConsole(() => main(['rank', '--league=1'], deps));
-
-  const [, options] = deps.formatTable.calls[0];
-  assert.match(options.header, /Season current/);
-});
-
-test('main rank calls readCurrent and readPrevious with only league and season', async () => {
+test('main rank calls readLatest and readPrevious with only league and season', async () => {
   const deps = makeFakeDeps({
     readPrevious: trackCalls(async () => makeSnapshot()),
   });
 
   await withCapturedConsole(() => main(['rank', '--league=1', '--season=89'], deps));
 
-  assert.deepEqual(deps.readCurrent.calls[0][0], { league: 1, season: 89 });
+  assert.deepEqual(deps.readLatest.calls[0][0], { league: 1, season: 89 });
   assert.deepEqual(deps.readPrevious.calls[0][0], { league: 1, season: 89 });
 });

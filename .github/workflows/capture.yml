@@ -1,0 +1,103 @@
+# Scheduled capture for rolling-window analytics (see README's "Rolling window analytics" and
+# "Automated capture" sections). The API only ever serves cumulative season-to-date totals and
+# can't backfill history, so a `--window` request is only as good as how densely captures have
+# accumulated -- this keeps that accumulation going regardless of whether anyone has the panel
+# open or a machine running locally.
+#
+# Commits land on a dedicated `pir-data` branch, never on `master`. `master` keeps `data/`
+# gitignored specifically so a local click of "Capture Snapshot" causes zero repository churn --
+# committing captures straight to `master` here would silently reverse that decision.
+#
+# Prerequisite (one-time, manual, not done by this workflow): the `pir-data` branch must already
+# exist before this can run -- `actions/checkout` fails hard on a missing ref, and a
+# self-creating workflow is more moving parts than it's worth for a one-time setup step.
+# Create it with:
+#   git switch --orphan pir-data && git commit --allow-empty -m "chore: initialize pir-data branch" && git push -u origin pir-data
+
+name: Capture PIR snapshots
+
+on:
+  schedule:
+    # Off the hour deliberately -- GitHub throttles jobs scheduled for :00 heavily under load,
+    # sometimes delaying them well past the requested time.
+    - cron: '17 9 * * *'
+  # Doubles as the one-click lever to re-enable this workflow if GitHub's 60-day
+  # no-activity auto-disable ever fires (see the note at the bottom of this file).
+  workflow_dispatch:
+
+concurrency:
+  group: pir-capture
+  # Never cancel a run that's already mid-write -- an interrupted commit is a much worse outcome
+  # than one run finishing a little late.
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source (master)
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: code
+
+      - name: Check out data branch (pir-data)
+        uses: actions/checkout@v4
+        with:
+          ref: pir-data
+          path: data-branch
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Each league's capture is isolated with continue-on-error so a single flaky upstream
+      # request (src/shlClient.js already retries once with a 30s timeout) costs at most that
+      # league's data for the day, never both.
+      - name: Capture SHL (league 0)
+        id: shl
+        continue-on-error: true
+        working-directory: code
+        env:
+          PIR_DATA_DIR: ${{ github.workspace }}/data-branch/data
+        run: node index.js update --league=0
+
+      - name: Capture SMJHL (league 1)
+        id: smjhl
+        continue-on-error: true
+        working-directory: code
+        env:
+          PIR_DATA_DIR: ${{ github.workspace }}/data-branch/data
+        run: node index.js update --league=1
+
+      - name: Fail the run only if BOTH leagues failed
+        if: steps.shl.outcome == 'failure' && steps.smjhl.outcome == 'failure'
+        run: |
+          echo "Both SHL and SMJHL captures failed -- see the step logs above." >&2
+          exit 1
+
+      - name: Commit captured data, if anything changed
+        working-directory: data-branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data
+
+          # The left side of this && short-circuits (without tripping `set -e`) the moment
+          # `--quiet` reports a real diff, so "no change" is the ONLY path that reaches `exit 0`
+          # here -- everything else falls through to the commit/push below.
+          git diff --cached --quiet && echo "No new data since the last capture -- nothing to commit." && exit 0
+
+          git commit -m "data: capture $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push origin HEAD:pir-data
+
+# Note on GitHub's 60-day auto-disable: a scheduled workflow is automatically disabled after 60
+# days with no activity on the REPOSITORY'S DEFAULT BRANCH -- commits this workflow makes to
+# `pir-data` do not reset that clock, since `pir-data` is deliberately not the default branch.
+# workflow_dispatch above is the one-click re-enable if that ever fires (GitHub emails a warning
+# first). Do NOT "fix" this by adding a step that also commits to `master` -- that would
+# reintroduce exactly the repository churn gitignoring `data/` on `master` was meant to prevent.

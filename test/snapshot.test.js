@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { captureSnapshot, computeMovement, trimPlayerRow, STORED_STAT_FIELDS } from '../src/snapshot.js';
+import { captureSnapshot, computeMovement, trimPlayerRow, playersFingerprint, STORED_STAT_FIELDS } from '../src/snapshot.js';
 import { makePlayerStatsRow, makePlayerRatingsRow, makeTrimmedPlayerRow, makeSnapshot } from './fixtures.js';
 
 const LEAGUE = 1;
@@ -15,7 +15,7 @@ function makeFakeDeps({
   existingSnapshot = null,
   seasonFinished = false,
 } = {}) {
-  const calls = { fetchPlayerStats: 0, fetchPlayerRatings: 0, rotateAndWrite: [] };
+  const calls = { fetchPlayerStats: 0, fetchPlayerRatings: 0, writeCapture: [] };
 
   const deps = {
     fetchPlayerStats: async () => {
@@ -26,9 +26,9 @@ function makeFakeDeps({
       calls.fetchPlayerRatings += 1;
       return ratingsRows;
     },
-    readCurrent: async () => existingSnapshot,
-    rotateAndWrite: async (args) => {
-      calls.rotateAndWrite.push(args);
+    readLatest: async () => existingSnapshot,
+    writeCapture: async (args) => {
+      calls.writeCapture.push(args);
     },
     isSeasonFinished: async () => seasonFinished,
   };
@@ -97,13 +97,13 @@ test('captureSnapshot assigns appliedTPE null for a stats row with no matching r
   assert.strictEqual(snapshot.players[0].appliedTPE, null);
 });
 
-test('captureSnapshot calls rotateAndWrite exactly once with the trimmed snapshot', async () => {
+test('captureSnapshot calls writeCapture exactly once with the trimmed snapshot', async () => {
   const { deps, calls } = makeFakeDeps();
 
   const { snapshot } = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
 
-  assert.strictEqual(calls.rotateAndWrite.length, 1);
-  assert.deepStrictEqual(calls.rotateAndWrite[0], { league: LEAGUE, season: SEASON, snapshot });
+  assert.strictEqual(calls.writeCapture.length, 1);
+  assert.deepStrictEqual(calls.writeCapture[0], { league: LEAGUE, season: SEASON, snapshot });
   assert.deepStrictEqual(snapshot.players[0], makeTrimmedPlayerRow());
 });
 
@@ -113,10 +113,10 @@ test('captureSnapshot skips entirely (no network calls) when the season is finis
 
   const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
 
-  assert.deepStrictEqual(result, { skipped: true, snapshot: existingSnapshot });
+  assert.deepStrictEqual(result, { skipped: true, reason: 'season-finished', snapshot: existingSnapshot });
   assert.strictEqual(calls.fetchPlayerStats, 0);
   assert.strictEqual(calls.fetchPlayerRatings, 0);
-  assert.strictEqual(calls.rotateAndWrite.length, 0);
+  assert.strictEqual(calls.writeCapture.length, 0);
 });
 
 test('captureSnapshot does not skip when the season is finished but no current snapshot exists yet', async () => {
@@ -129,13 +129,134 @@ test('captureSnapshot does not skip when the season is finished but no current s
 });
 
 test('captureSnapshot does not skip when no season is given, even if isSeasonFinished would resolve true', async () => {
-  const { deps, calls } = makeFakeDeps({ seasonFinished: true, existingSnapshot: makeSnapshot() });
+  // existingSnapshot is null here (not makeSnapshot()) specifically so the unrelated
+  // unchanged-capture dedup below can never spuriously trigger and mask what this test is
+  // actually checking: that the SEASON-FINISHED skip path is never entered without an
+  // explicit --season, regardless of what isSeasonFinished would say.
+  const { deps, calls } = makeFakeDeps({ seasonFinished: true, existingSnapshot: null });
 
   const result = await captureSnapshot({ league: LEAGUE }, deps, '/fake/dir');
 
   assert.strictEqual(result.skipped, false);
   assert.strictEqual(calls.fetchPlayerStats, 1);
-  assert.strictEqual(result.snapshot.season, undefined);
+});
+
+// --- no-op capture dedup -----------------------------------------------------
+// Daily-cadence captures routinely land on a non-game day with byte-identical player data.
+// Writing a new file for that adds nothing, and (per store.js's findAnchorCapture) a
+// zero-game-span candidate anchor a window request could pick.
+
+test('captureSnapshot skips writing (but never skips the network call) when the new capture is identical to the existing one', async () => {
+  const existingSnapshot = makeSnapshot(); // players: [makeTrimmedPlayerRow()] -- matches the default fetch below exactly
+  const { deps, calls } = makeFakeDeps({ existingSnapshot });
+
+  const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.deepStrictEqual(result, { skipped: true, reason: 'unchanged', snapshot: existingSnapshot });
+  // Unlike the season-finished skip above, "unchanged" can only be known AFTER fetching, so
+  // the network call is never avoided by this skip -- only the disk write is.
+  assert.strictEqual(calls.fetchPlayerStats, 1);
+  assert.strictEqual(calls.fetchPlayerRatings, 1);
+  assert.strictEqual(calls.writeCapture.length, 0);
+});
+
+test('captureSnapshot writes normally when a stat differs from the existing capture', async () => {
+  const existingSnapshot = makeSnapshot({ players: [makeTrimmedPlayerRow({ points: 1 })] });
+  const statsRows = [makePlayerStatsRow({ points: 999 })];
+  const { deps, calls } = makeFakeDeps({ statsRows, existingSnapshot });
+
+  const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(result.skipped, false);
+  assert.strictEqual(calls.writeCapture.length, 1);
+});
+
+test('captureSnapshot treats reordered-but-otherwise-identical player rows as unchanged', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1 }), makePlayerStatsRow({ id: 2 })];
+  const ratingsRows = [makePlayerRatingsRow({ id: 1 }), makePlayerRatingsRow({ id: 2 })];
+  const existingSnapshot = makeSnapshot({
+    // Same two players as the fetch will produce, but REVERSED -- order must not matter.
+    players: [trimPlayerRow(makePlayerStatsRow({ id: 2 }), 350), trimPlayerRow(makePlayerStatsRow({ id: 1 }), 350)],
+  });
+  const { deps, calls } = makeFakeDeps({ statsRows, ratingsRows, existingSnapshot });
+
+  const result = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(result.skipped, true);
+  assert.strictEqual(result.reason, 'unchanged');
+  assert.strictEqual(calls.writeCapture.length, 0);
+});
+
+// --- playersFingerprint ------------------------------------------------------
+
+test('playersFingerprint is stable regardless of array order', () => {
+  const a = [makeTrimmedPlayerRow({ id: 1 }), makeTrimmedPlayerRow({ id: 2 })];
+  const b = [makeTrimmedPlayerRow({ id: 2 }), makeTrimmedPlayerRow({ id: 1 })];
+
+  assert.strictEqual(playersFingerprint(a), playersFingerprint(b));
+});
+
+test('playersFingerprint changes when any player value changes', () => {
+  const a = [makeTrimmedPlayerRow({ id: 1, points: 10 })];
+  const b = [makeTrimmedPlayerRow({ id: 1, points: 11 })];
+
+  assert.notStrictEqual(playersFingerprint(a), playersFingerprint(b));
+});
+
+// --- season resolution -------------------------------------------------------
+// The raw players/stats rows each carry the season they belong to, and captureSnapshot uses
+// that -- not the caller's possibly-omitted `season` argument -- as the source of truth for
+// what season a capture actually holds. This is what makes every capture self-describing
+// rather than relying on a "current" bucket whose meaning silently changes when the league
+// rolls over to a new season.
+
+test('captureSnapshot resolves the season from the API rows even when --season was omitted', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1, season: 89 })];
+  const { deps } = makeFakeDeps({ statsRows });
+
+  const { snapshot } = await captureSnapshot({ league: LEAGUE }, deps, '/fake/dir');
+
+  assert.strictEqual(snapshot.season, 89);
+});
+
+test('captureSnapshot throws when the requested season contradicts what the API actually returned', async () => {
+  const statsRows = [makePlayerStatsRow({ id: 1, season: 90 })];
+  const { deps } = makeFakeDeps({ statsRows });
+
+  await assert.rejects(
+    () => captureSnapshot({ league: LEAGUE, season: 89 }, deps, '/fake/dir'),
+    /Requested season 89 but the API returned season 90/,
+  );
+});
+
+test('captureSnapshot throws when player rows disagree on season with each other', async () => {
+  const statsRows = [
+    makePlayerStatsRow({ id: 1, season: 89 }),
+    makePlayerStatsRow({ id: 2, season: 90 }),
+  ];
+  const { deps } = makeFakeDeps({ statsRows });
+
+  await assert.rejects(
+    () => captureSnapshot({ league: LEAGUE }, deps, '/fake/dir'),
+    /player rows disagree on season/,
+  );
+});
+
+test('captureSnapshot throws when the API returns zero rows and no --season was given to fall back on', async () => {
+  const { deps } = makeFakeDeps({ statsRows: [] });
+
+  await assert.rejects(
+    () => captureSnapshot({ league: LEAGUE }, deps, '/fake/dir'),
+    /zero player rows and no --season was given/,
+  );
+});
+
+test('captureSnapshot falls back to the requested season when the API returns zero rows but --season was given', async () => {
+  const { deps } = makeFakeDeps({ statsRows: [] });
+
+  const { snapshot } = await captureSnapshot({ league: LEAGUE, season: SEASON }, deps, '/fake/dir');
+
+  assert.strictEqual(snapshot.season, SEASON);
 });
 
 // --- computeMovement -------------------------------------------------------

@@ -7,8 +7,9 @@
   "private": true,
   "scripts": {
     "start": "node index.js",
+    "serve": "node serve.js",
     "test": "node --test",
-    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-exclude=test/**"
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-exclude=test/** --test-coverage-exclude=src/web/public/**"
   },
   "engines": { "node": ">=24" }
 }

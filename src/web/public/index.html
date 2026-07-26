@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PIR Control Panel</title>
+  <link rel="icon" href="data:," />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Saira+Condensed:wght@600;700;800&family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+
+  <header class="masthead">
+    <div class="masthead-id">
+      <span class="masthead-mark">PIR</span>
+      <span class="masthead-sub">CONTROL&nbsp;PANEL</span>
+    </div>
+    <div class="masthead-meta">
+      <span id="dataDirReadout" class="mono dim">--</span>
+      <span id="statusPill" class="status-pill" role="status" aria-live="polite">idle</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="rail" aria-label="Controls">
+      <section class="rail-block">
+        <h2 class="rail-title">League</h2>
+        <div id="leagueChips" class="chip-group" role="radiogroup" aria-label="League"></div>
+      </section>
+
+      <section class="rail-block">
+        <h2 class="rail-title">Season</h2>
+        <select id="seasonSelect" class="select" aria-label="Season"></select>
+        <p id="seasonNote" class="rail-note"></p>
+      </section>
+
+      <section class="rail-block">
+        <button id="captureButton" type="button" class="btn btn-primary">Capture Snapshot</button>
+        <p id="captureStatus" class="rail-note" aria-live="polite"></p>
+        <button id="newSeasonToggle" type="button" class="btn btn-ghost btn-small">+ Capture a different season</button>
+        <div id="newSeasonForm" class="new-season-form hidden">
+          <input id="newSeasonInput" class="text-input" type="text" inputmode="numeric" placeholder="season #, blank = live" />
+          <button id="newSeasonCapture" type="button" class="btn btn-ghost btn-small">Go</button>
+        </div>
+      </section>
+
+      <section class="rail-block">
+        <h2 class="rail-title">Baseline</h2>
+        <div id="baselineChips" class="chip-group" role="radiogroup" aria-label="Baseline"></div>
+      </section>
+
+      <section class="rail-block">
+        <h2 class="rail-title">Window</h2>
+        <select id="windowSelect" class="select" aria-label="Rolling window">
+          <option value="" selected>Season to date</option>
+          <option value="5">Last ~5 games</option>
+          <option value="8">Last ~8 games</option>
+          <option value="12">Last ~12 games</option>
+        </select>
+        <p id="windowNote" class="rail-note"></p>
+      </section>
+
+      <section class="rail-block">
+        <label class="checkbox-row">
+          <input id="movementToggle" type="checkbox" checked />
+          <span>Show movement</span>
+        </label>
+        <p id="movementNote" class="rail-note"></p>
+      </section>
+
+      <section class="rail-block">
+        <h2 class="rail-title">Shrinkage <span class="mono dim">(min)</span></h2>
+        <input id="shrinkInput" class="text-input" type="text" inputmode="numeric" value="" placeholder="auto" aria-label="Shrinkage constant in minutes" />
+        <p class="rail-note">Pulls small-sample rates toward the league mean, scaled to sample depth. Blank = adaptive (recommended); 0 disables it entirely.</p>
+      </section>
+    </aside>
+
+    <main class="canvas">
+      <div id="metaStrip" class="meta-strip mono"></div>
+
+      <div id="excludedBanner" class="excluded-banner hidden">
+        <button id="excludedToggle" type="button" class="excluded-summary"></button>
+        <ul id="excludedList" class="excluded-list hidden"></ul>
+      </div>
+
+      <div class="toolbar">
+        <input id="filterInput" class="text-input filter-input" type="search" placeholder="Filter by name or team&hellip;" aria-label="Filter players" />
+        <div id="positionChips" class="chip-group chip-group-compact" role="radiogroup" aria-label="Position filter"></div>
+        <select id="topSelect" class="select" aria-label="Rows to show">
+          <option value="25">Top 25</option>
+          <option value="50">Top 50</option>
+          <option value="100">Top 100</option>
+          <option value="all" selected>All</option>
+        </select>
+        <span id="countReadout" class="mono dim count-readout"></span>
+      </div>
+
+      <div id="tableWrap" class="table-wrap" aria-busy="false">
+        <table class="board" id="board">
+          <thead>
+            <tr id="boardHeadRow"></tr>
+          </thead>
+          <tbody id="boardBody"></tbody>
+        </table>
+        <div id="emptyState" class="empty-state hidden"></div>
+      </div>
+
+      <div id="errorBanner" class="error-banner hidden" role="alert">
+        <span id="errorMessage"></span>
+        <button id="errorRetry" type="button" class="btn btn-ghost btn-small">Retry</button>
+        <button id="errorDismiss" type="button" class="btn btn-ghost btn-small">Dismiss</button>
+      </div>
+
+      <footer class="export-row">
+        <span class="rail-title">Export</span>
+        <a id="exportCsv" class="btn btn-ghost btn-small" href="#" download>CSV</a>
+        <a id="exportJson" class="btn btn-ghost btn-small" href="#" download>JSON</a>
+        <a id="exportTable" class="btn btn-ghost btn-small" href="#" download>Text table</a>
+        <span class="export-caption">Same code path as the CLI's <code class="mono">--out</code> flag &mdash; byte-identical output. Reflects league / season / baseline / movement / shrink / window only, not the on-screen filter or sort.</span>
+      </footer>
+    </main>
+  </div>
+
+  <template id="rowDetailTemplate">
+    <tr class="detail-row hidden">
+      <td class="detail-cell" colspan="10">
+        <div class="detail-grid"></div>
+      </td>
+    </tr>
+  </template>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

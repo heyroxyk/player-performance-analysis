@@ -13,6 +13,15 @@ function hasMovementData(rows) {
   return rows.some((row) => row.rankDelta !== undefined || row.isNew !== undefined);
 }
 
+// Window rows (see src/pir/window.js) are shape-compatible with season rows -- same field
+// names throughout -- so this is the only way to tell the two apart: a window row carries the
+// season totals ALONGSIDE the window-scoped gamesPlayed/timeOnIce it's actually scored on.
+// Sniffing (rather than a caller-supplied flag) means this can never drift out of sync with
+// what's actually in the rows.
+function hasWindowData(rows) {
+  return rows.some((row) => row.seasonGamesPlayed !== undefined);
+}
+
 function formatTimeOnIce(totalSeconds) {
   const seconds = Math.round(totalSeconds);
   const minutes = Math.floor(seconds / 60);
@@ -40,7 +49,7 @@ function formatPirDelta(row) {
 // Rank is derived from array position rather than read off the row: the caller hands us rows
 // in final ranked order, so re-deriving it here means this module never has to trust (or
 // re-validate) a rank field that could drift out of sync with the actual array order.
-function buildColumns(includeMovement) {
+function buildColumns(includeMovement, includeWindow) {
   const columns = [{ label: 'Rank', align: 'right', getValue: (_row, rank) => String(rank) }];
 
   if (includeMovement) {
@@ -51,15 +60,27 @@ function buildColumns(includeMovement) {
     { label: 'Player', align: 'left', getValue: (row) => row.name },
     { label: 'Pos', align: 'left', getValue: (row) => row.position },
     { label: 'Team', align: 'left', getValue: (row) => row.team },
-    { label: 'GP', align: 'right', getValue: (row) => String(row.gamesPlayed) },
-    { label: 'TOI', align: 'right', getValue: (row) => formatTimeOnIce(row.timeOnIce) },
-    { label: 'PIR', align: 'right', getValue: (row) => row.pir.toFixed(2) }
+    // In window mode, GP/TOI on the row ARE the window-scoped values (see src/pir/window.js) --
+    // labelling them explicitly so a window leaderboard is never visually indistinguishable
+    // from a season one.
+    { label: includeWindow ? 'GP (win)' : 'GP', align: 'right', getValue: (row) => String(row.gamesPlayed) },
+    { label: includeWindow ? 'TOI (win)' : 'TOI', align: 'right', getValue: (row) => formatTimeOnIce(row.timeOnIce) }
   );
+
+  if (includeWindow) {
+    columns.push({ label: 'Season GP', align: 'right', getValue: (row) => String(row.seasonGamesPlayed) });
+  }
+
+  columns.push({ label: 'PIR', align: 'right', getValue: (row) => row.pir.toFixed(2) });
 
   if (includeMovement) {
     columns.push({ label: 'PIR+/-', align: 'right', getValue: (row) => formatPirDelta(row) });
   }
 
+  // PIR is a rate (impact per 60 minutes); Total is that same rate multiplied back out by
+  // minutes actually played, so a durable full-season contributor isn't invisible next to a
+  // hot small-sample player with a higher rate but far less accumulated impact.
+  columns.push({ label: 'Total', align: 'right', getValue: (row) => row.totalImpact.toFixed(2) });
   columns.push({ label: 'TPE', align: 'right', getValue: (row) => String(row.appliedTPE) });
 
   return columns;
@@ -72,7 +93,8 @@ function pad(value, width, align) {
 export function formatTable(rankedRows, { top = Infinity, header = null } = {}) {
   const rows = rankedRows.slice(0, top);
   const includeMovement = hasMovementData(rows);
-  const columns = buildColumns(includeMovement);
+  const includeWindow = hasWindowData(rows);
+  const columns = buildColumns(includeMovement, includeWindow);
 
   const cellsByRow = rows.map((row, index) =>
     columns.map((column) => column.getValue(row, index + 1))
