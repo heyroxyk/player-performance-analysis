@@ -27,6 +27,40 @@ export function formatPirDelta(row) {
   return `${sign}${row.pirDelta.toFixed(2)}`;
 }
 
+const MINUTE_MS = 60_000;
+const HOUR_MS = 60 * MINUTE_MS;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * A human-readable "how long ago" string for a capture's timestamp -- so the panel can show
+ * "captured 3 hours ago" rather than only a bare ISO timestamp, making it clear at a glance that
+ * the data is already current and a live refresh isn't something the user needs to reach for.
+ * `now` is a parameter (not `new Date()` computed internally) so this stays pure and directly
+ * testable, and so a caller can re-render the same capturedAt against a fresh "now" on a timer
+ * without this function drifting out of sync with what's on screen.
+ * @param {string|Date} capturedAt
+ * @param {Date} now
+ * @returns {string} "just now", "N minute(s) ago", "N hour(s) ago", or "N day(s) ago" -- floored,
+ *   never negative (a capturedAt that's technically in the future, e.g. from clock skew, still
+ *   reads as "just now" rather than a confusing negative duration).
+ */
+export function formatRelativeTime(capturedAt, now) {
+  const capturedMs = capturedAt instanceof Date ? capturedAt.getTime() : new Date(capturedAt).getTime();
+  const diffMs = Math.max(0, now.getTime() - capturedMs);
+
+  if (diffMs < MINUTE_MS) return 'just now';
+  if (diffMs < HOUR_MS) {
+    const minutes = Math.floor(diffMs / MINUTE_MS);
+    return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  }
+  if (diffMs < DAY_MS) {
+    const hours = Math.floor(diffMs / HOUR_MS);
+    return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  }
+  const days = Math.floor(diffMs / DAY_MS);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+
 /**
  * True when `rows` contains more than one distinct player status -- mirrors
  * src/report/table.js's own hasVariedStatus (and its rationale): a leaderboard already filtered

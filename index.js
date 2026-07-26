@@ -8,7 +8,6 @@
 import { fileURLToPath } from 'node:url';
 
 import {
-  defaultDeps,
   captureUpdate,
   getRanking,
   formatRanking,
@@ -18,6 +17,7 @@ import {
   VALID_STATUSES,
   parseNonNegativeInteger,
 } from './src/commands.js';
+import { defaultDeps } from './src/nodeCommandDeps.js';
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing

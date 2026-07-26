@@ -4,11 +4,15 @@
 // from the latest one -- this module is that reconstruction.
 //
 // The central design constraint: emitted rows are shape-compatible with a stored player row
-// (see src/snapshot.js STORED_STAT_FIELDS) -- same field names, including reconstructed
+// (see src/snapshotBuild.js STORED_STAT_FIELDS) -- same field names, including reconstructed
 // FFPctRel/GF60/GA60/SF60/SA60. That means filterScoreableRows, computePir, components.js and
 // the whole scoring pipeline in src/pir/pirEngine.js are reused UNMODIFIED. This module adds an
 // input transform ahead of scoring, not a parallel scoring path.
-import { medianGamesPlayed } from '../store.js';
+//
+// Imports medianGamesPlayed from ../median.js, not ../store.js: this module is otherwise pure
+// math with no I/O, and store.js pulls in node:fs/promises/node:url/node:path, which would make
+// this file (and everything that imports it, including src/commands.js) unloadable in a browser.
+import { median, medianGamesPlayed } from '../median.js';
 
 // Five skaters are credited for the same on-ice Fenwick event, so a team's on-ice total is the
 // sum of its players' own on-ice totals divided by this, not the raw sum.
@@ -35,17 +39,6 @@ const WINDOW_COUNTING_FIELDS = [
   'gamesPlayed', 'timeOnIce', 'goals', 'assists', 'points', 'pim',
   'hits', 'giveaways', 'takeaways', 'shotsBlocked', 'CF', 'CA', 'FF', 'FA',
 ];
-
-// A plain (unweighted) median over raw numbers, for the summary's window-scoped figures.
-// Deliberately not the TOI-weighted populationMean/Stdev in pirEngine.js -- those describe a
-// RATE's population; this describes the window sample sizes themselves.
-function median(values) {
-  const sorted = [...values].sort((a, b) => a - b);
-  if (sorted.length === 0) return NaN;
-
-  const midIndex = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[midIndex - 1] + sorted[midIndex]) / 2 : sorted[midIndex];
-}
 
 /**
  * Un-averages a pre-computed per-60 on-ice rate over a window. GF60/GA60/SF60/SA60 are 5-on-5

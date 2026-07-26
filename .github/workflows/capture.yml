@@ -14,6 +14,9 @@
 # Create it with:
 #   git switch --orphan pir-data && git commit --allow-empty -m "chore: initialize pir-data branch" && git push -u origin pir-data
 
+# NOTE: this workflow's name below is matched BY EXACT STRING in pages.yml's `workflow_run`
+# trigger, so a successful capture redeploys the hosted control panel -- renaming this workflow
+# without updating pages.yml silently stops that redeploy.
 name: Capture PIR snapshots
 
 on:

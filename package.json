@@ -8,8 +8,9 @@
   "scripts": {
     "start": "node index.js",
     "serve": "node serve.js",
+    "build:site": "node scripts/buildSite.js",
     "test": "node --test",
-    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-exclude=test/** --test-coverage-exclude=src/web/public/**"
+    "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-exclude=test/** --test-coverage-exclude=src/web/public/** --test-coverage-exclude=scripts/**"
   },
   "engines": { "node": ">=24" }
 }

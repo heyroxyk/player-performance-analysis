@@ -1,14 +1,14 @@
-// Shared update/rank orchestration, used by both the CLI (index.js) and the web control panel
-// (src/web/server.js) so the two front ends can never drift into scoring things differently.
-// This module owns the *computation*; each front end owns its own presentation (console.log +
-// file writes for the CLI, JSON/HTTP responses for the web server) -- notably, nothing in here
-// writes to the console, so a browser-facing caller can render exclusions and results without
-// losing information to stderr.
+// Shared update/rank orchestration, used by both the CLI (index.js), the local web control panel
+// (src/web/server.js), and the static/browser panel (src/web/public/app.js) so none of the three
+// front ends can ever drift into scoring things differently. This module owns the *computation*
+// and the *shape* of what a front end must supply to run it (see the CommandDeps typedef below)
+// -- each front end owns its own presentation (console.log + file writes for the CLI, JSON/HTTP
+// responses for the local web server, DOM rendering for the browser) and its own DEPS
+// implementation (src/nodeCommandDeps.js, src/browserCommandDeps.js). Notably, nothing in here
+// writes to the console or touches a filesystem or network directly -- every capability a caller
+// needs arrives through the injected `deps` object, which is what makes this module loadable
+// unmodified in a browser with no node: imports at all.
 
-import { writeFile } from 'node:fs/promises';
-
-import { captureSnapshot, computeMovement } from './snapshot.js';
-import { readLatest, readPrevious, findAnchorCapture } from './store.js';
 import { filterScoreableRows, computePir, rankByPir, adaptiveShrinkageMinutes, DEFAULT_SHRINKAGE_MINUTES } from './pir/pirEngine.js';
 import { buildWindowRows, evaluateWindowQuality } from './pir/window.js';
 import { POSITION_GROUPS } from './pir/components.js';
@@ -17,6 +17,26 @@ import { toJson } from './report/jsonWriter.js';
 import { toCsv } from './report/csvWriter.js';
 
 export { DEFAULT_SHRINKAGE_MINUTES };
+
+/**
+ * The full contract a front end must satisfy to run update/rank orchestration. commands.js owns
+ * this SHAPE and none of its implementations: src/nodeCommandDeps.js wires the disk/fs-backed
+ * ones (readLatest/readPrevious/findAnchorCapture from store.js, captureSnapshot from
+ * snapshot.js, a real writeFile for the CLI's --out flag), src/browserCommandDeps.js wires the
+ * manifest+fetch-backed ones (src/browserStore.js) with no writeFile at all -- browser export is
+ * a client-side Blob download, not a disk write. Every other key (buildWindowRows,
+ * evaluateWindowQuality, adaptiveShrinkageMinutes, filterScoreableRows, computePir, rankByPir,
+ * computeMovement, formatTable, toJson, toCsv, POSITION_GROUPS) is pure compute and identical in
+ * both wirings by construction, since both import it from the same src/pir and src/report
+ * modules rather than reimplementing it.
+ * @typedef {{
+ *   captureSnapshot: Function, readLatest: Function, readPrevious: Function,
+ *   findAnchorCapture: Function, buildWindowRows: Function, evaluateWindowQuality: Function,
+ *   adaptiveShrinkageMinutes: Function, filterScoreableRows: Function, computePir: Function,
+ *   rankByPir: Function, computeMovement: Function, formatTable: Function, toJson: Function,
+ *   toCsv: Function, POSITION_GROUPS: object, writeFile?: Function,
+ * }} CommandDeps
+ */
 
 export const VALID_LEAGUES = new Set([0, 1, 2, 3]);
 export const VALID_BASELINES = new Set(['league', 'position']);
@@ -85,28 +105,6 @@ export function validateOptions({ league, baseline, format, status }) {
   }
 }
 
-// Real implementations wired together for production use. Every function below arrives
-// through this object rather than a direct import, so tests can substitute plain fake functions
-// with no mocking library.
-export const defaultDeps = {
-  captureSnapshot,
-  readLatest,
-  readPrevious,
-  findAnchorCapture,
-  buildWindowRows,
-  evaluateWindowQuality,
-  adaptiveShrinkageMinutes,
-  filterScoreableRows,
-  computePir,
-  rankByPir,
-  computeMovement,
-  formatTable,
-  toJson,
-  toCsv,
-  writeFile,
-  POSITION_GROUPS,
-};
-
 // ---------------------------------------------------------------------------
 // update
 // ---------------------------------------------------------------------------
@@ -122,7 +120,7 @@ export function buildUpdateSuggestion({ league, season }) {
  * object -- no console output, no file writes, so both the CLI and the web control panel can
  * decide for themselves how to present it.
  * @param {{league: number, season?: number}} params
- * @param {typeof defaultDeps} deps
+ * @param {CommandDeps} deps
  * @returns {Promise<{
  *   skipped: boolean,
  *   reason?: 'season-finished' | 'unchanged',
@@ -250,7 +248,7 @@ function throwWindowUnavailable({ league, season, windowGames, blockers }) {
  *   shrinkageMinutes?: number, windowGames?: number, status?: 'active' | 'inactive' | 'all',
  * }} args
  * @param {object} current - the current (latest) snapshot for this league+season
- * @param {typeof defaultDeps} deps
+ * @param {CommandDeps} deps
  * @returns {Promise<{
  *   ranked: Array<object>, excluded: Array<object>,
  *   shrinkageMinutes: number, shrinkageMode: 'adaptive' | 'explicit', window: object | null,
@@ -368,7 +366,7 @@ export function formatRanking(ranked, { format, top, meta }, deps) {
  *   league: number, season?: number, baseline: string, movement: boolean,
  *   shrinkageMinutes?: number, windowGames?: number, status?: 'active' | 'inactive' | 'all',
  * }} args
- * @param {typeof defaultDeps} deps
+ * @param {CommandDeps} deps
  * @returns {Promise<{ranked: Array<object>, meta: object, excluded: Array<object>}>}
  */
 export async function getRanking(args, deps) {

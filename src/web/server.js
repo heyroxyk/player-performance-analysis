@@ -1,35 +1,38 @@
-// The control panel's HTTP server: static asset serving for the browser UI, plus the /api/*
-// JSON routes defined in apiRoutes.js. This is a local, single-user tool that writes files and
-// makes live outbound API calls on a browser's say-so, so every design choice here leans
+// The control panel's HTTP server: static asset serving for the browser UI (the same static
+// client the GitHub Pages build ships -- see src/web/staticAssets.js), the /data/* routes that
+// serve local disk captures the same way the Pages artifact serves baked-in ones, and the
+// /api/* JSON routes defined in apiRoutes.js (now reduced to just POST /api/update -- the local
+// disk capture no static site can perform; the other four are a temporary fallback, deleted
+// once the static client is proven out). This is a local, single-user tool that writes files
+// and makes live outbound API calls on a browser's say-so, so every design choice here leans
 // toward the smallest possible attack surface rather than flexibility -- see the inline
 // comments at each check for what it defends against.
 
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, extname } from 'node:path';
 
-import { defaultDeps as commandsDefaultDeps } from '../commands.js';
+import { defaultDeps as commandsDefaultDeps } from '../nodeCommandDeps.js';
 import { defaultDeps as snapshotIndexDefaultDeps } from './snapshotIndex.js';
+import { STATIC_ASSETS, CONTENT_TYPES } from './staticAssets.js';
+import { handleDataRequest } from './dataRoutes.js';
 import { handleLeagues, handleSnapshots, handleRank, handleExport, handleUpdate } from './apiRoutes.js';
 import { sendError, sendText, HttpError } from './httpUtil.js';
 
-const PUBLIC_DIR = join(dirname(fileURLToPath(import.meta.url)), 'public');
+// server.js lives at src/web/server.js -- two levels up is the repo root, which is also where
+// the GitHub Pages artifact's root is mirrored (see src/web/staticAssets.js's header comment):
+// the exact same repo-relative paths resolve to the exact same files in both places.
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DEFAULT_PORT = 8765;
 
-// Static assets served from a literal filename map rather than resolving the request path
-// against the filesystem: with no `..` handling, no percent-decoding, and no path-join at all
-// on the request string, path traversal isn't sanitized against here -- it's structurally
-// absent, since the request pathname never reaches anything that would interpret `..`, a
-// backslash, or a drive-relative form. Add a new static file by adding a map entry, not by
-// widening what paths are servable.
-const STATIC_FILES = new Map([
-  ['/', { file: 'index.html', type: 'text/html; charset=utf-8' }],
-  ['/index.html', { file: 'index.html', type: 'text/html; charset=utf-8' }],
-  ['/app.js', { file: 'app.js', type: 'text/javascript; charset=utf-8' }],
-  ['/format.js', { file: 'format.js', type: 'text/javascript; charset=utf-8' }],
-  ['/styles.css', { file: 'styles.css', type: 'text/css; charset=utf-8' }],
-]);
+// Built from the single STATIC_ASSETS list src/web/staticAssets.js also hands to
+// scripts/buildSite.js -- see that file for why this stays a literal map rather than a glob.
+// The request pathname is still only ever used as a Map key here, never joined into a
+// filesystem path, so path traversal remains structurally absent, not sanitized against.
+const STATIC_FILES = new Map(STATIC_ASSETS.map(([urlPath, repoRelativePath]) => [
+  urlPath, { file: repoRelativePath, type: CONTENT_TYPES[extname(repoRelativePath)] },
+]));
 
 async function serveStaticFile(pathname, res) {
   if (pathname === '/favicon.ico') {
@@ -45,7 +48,7 @@ async function serveStaticFile(pathname, res) {
 
   let content;
   try {
-    content = await readFile(join(PUBLIC_DIR, entry.file));
+    content = await readFile(join(REPO_ROOT, entry.file));
   } catch (error) {
     // A map entry pointing at a file that isn't actually on disk is a bug in this server, not
     // a client error -- surfacing it as a named 500 makes that obvious during development
@@ -99,6 +102,11 @@ const API_ROUTES = [
 
 async function dispatch(req, res, ctx) {
   const url = new URL(req.url, `http://127.0.0.1:${ctx.port}`);
+
+  if (url.pathname.startsWith('/data/')) {
+    await handleDataRequest(url, res);
+    return;
+  }
 
   if (!url.pathname.startsWith('/api/')) {
     await serveStaticFile(url.pathname, res);

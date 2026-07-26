@@ -9,6 +9,13 @@
 const USER_AGENT = 'Mozilla/5.0 (compatible; SHL-PlayerImpact-Bot/1.0)';
 const INDEX_API_V1 = 'https://index.simulationhockey.com/api/v1';
 
+// `User-Agent` is a forbidden header name a page can never set -- fetch() silently drops it in a
+// browser, so setting it there would be dead code masking a real difference in what actually
+// goes over the wire. Node has no such restriction, and needs it: the comment above is what this
+// header is FOR. `typeof document === 'undefined'` is the same browser-detection this codebase
+// already uses for other Node-vs-browser branches (see src/portalClient.js's identical check).
+const REQUEST_HEADERS = typeof document === 'undefined' ? { 'User-Agent': USER_AGENT } : undefined;
+
 // No published guidance on typical response times for this endpoint from this
 // project, so we start from the sibling project's measured budget (a healthy
 // request clears in ~150ms; this is sized for the endpoint's occasional
@@ -43,7 +50,7 @@ async function fetchOnce(url) {
 
   let res;
   try {
-    res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: controller.signal });
+    res = await fetch(url, { headers: REQUEST_HEADERS, signal: controller.signal });
   } catch (error) {
     if (error.name === 'AbortError') {
       const timeoutError = new Error(`SHL API request timed out after ${REQUEST_TIMEOUT_MS}ms (${url})`);

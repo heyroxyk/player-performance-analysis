@@ -1,12 +1,46 @@
 // PIR Control Panel frontend. Vanilla ES module, no build step, no framework. Untested by
 // design (see src/web/public/format.js for the pure logic that IS tested) -- kept thin, with
-// every non-trivial decision (validation, scoring, formatting) pushed to the server so this
-// file is mostly DOM wiring.
+// every non-trivial decision (validation, scoring, formatting) pushed to src/commands.js so
+// this file is mostly DOM wiring.
+//
+// Runs the SAME compute pipeline the CLI and the local control panel server use --
+// getRanking/formatRanking from ../../commands.js -- against a browser-backed store
+// (../../browserStore.js) instead of a Node server. That's true whether this page is served by
+// `node serve.js` on localhost or by GitHub Pages: the only thing that differs between the two
+// is where the data comes from (a live local filesystem vs. a prebuilt manifest baked into the
+// deploy), never how a leaderboard gets scored. The one thing that genuinely can't exist without
+// a server -- writing a new capture to disk -- stays local-only, gated on the manifest's own
+// `localCapture` flag (see updateCaptureAvailability below).
 
-import { formatTimeOnIce, formatRankMovement, formatPirDelta, filterRows, sortRows, hasVariedStatus } from './format.js';
+import { formatTimeOnIce, formatRankMovement, formatPirDelta, formatRelativeTime, filterRows, sortRows, hasVariedStatus } from './format.js';
+import { getRanking, formatRanking } from '../../commands.js';
+import { createBrowserStore } from '../../browserStore.js';
+import { createBrowserCommandDeps } from '../../browserCommandDeps.js';
 
-const LEAGUES_FALLBACK = [{ id: 0, name: 'SHL' }, { id: 1, name: 'SMJHL' }];
+const LEAGUES = [{ id: 0, name: 'SHL' }, { id: 1, name: 'SMJHL' }];
 const POSITION_FILTERS = ['ALL', 'F', 'D', 'C', 'LW', 'RW', 'LD', 'RD'];
+
+// Past this age, a capture is old enough that a scheduled capture run was likely missed --
+// see styles.css's .freshness-readout.stale for the visual treatment.
+const STALE_CAPTURE_MS = 36 * 60 * 60 * 1000;
+const FRESHNESS_RERENDER_MS = 60_000;
+
+const EXPORT_CONTENT_TYPES = {
+  table: 'text/plain; charset=utf-8',
+  json: 'application/json; charset=utf-8',
+  csv: 'text/csv; charset=utf-8',
+};
+const EXPORT_EXTENSIONS = { table: 'txt', json: 'json', csv: 'csv' };
+
+// app.js lives at <root>/src/web/public/app.js in BOTH worlds (local dev and the Pages
+// artifact -- see src/web/staticAssets.js's header comment for why the two share one layout),
+// so this relative URL resolves to <root>/data/ identically whether <root> is
+// http://127.0.0.1:8765/ or https://<user>.github.io/player-performance-analysis/. No
+// configuration, no build-time base injection, no environment branch.
+const DATA_BASE_URL = new URL('../../../data/', import.meta.url);
+
+const store = createBrowserStore({ baseUrl: DATA_BASE_URL });
+const deps = createBrowserCommandDeps({ store });
 
 // Window mode swaps in a couple of columns (see src/report/table.js's identical
 // buildColumns(includeMovement, includeWindow) for the server-side analogue) -- GP/TOI are
@@ -43,7 +77,6 @@ function buildColumns(isWindow, isStatus) {
 }
 
 const state = {
-  leagues: LEAGUES_FALLBACK,
   league: 0,
   season: undefined,
   baseline: 'league',
@@ -60,12 +93,24 @@ const state = {
   sortDirection: 'asc',
   snapshotsByLeague: new Map(),
   ranking: null, // { meta, players, excluded }
+  // PIR-derived rank by player id, kept OUT of the row objects themselves (see loadRanking) so
+  // re-sorting the on-screen table by a different column can never leak into what gets
+  // exported -- toJson would otherwise serialize a `rank` key the CLI's own output never has.
+  rankById: new Map(),
   expandedId: null,
-  rankAbortController: null,
+  // A generation counter standing in for AbortController: getRanking's own async chain (fetches
+  // through the browser store) has no cancellation signal threaded through it, so a stale
+  // in-flight call is left to resolve on its own -- this counter is what lets loadRanking notice
+  // "a newer request has since started" and discard the stale result rather than racing it.
+  rankRequestId: 0,
+  // Only true when this page is served by the local dev server (src/web/server.js), which still
+  // exposes POST /api/update for a real disk capture -- the manifest itself reports this (see
+  // init()), so the client never has to probe or guess.
+  localCapture: false,
 };
 
 // ---------------------------------------------------------------------------
-// fetch helper
+// fetch helper (POST /api/update only -- the one route that survives locally)
 // ---------------------------------------------------------------------------
 
 async function api(path, options) {
@@ -91,11 +136,26 @@ async function api(path, options) {
   return body;
 }
 
+// Reproduces apiRoutes.js's getRankingOrNotFound tagging exactly (.notFound -> NO_SNAPSHOT,
+// .windowUnavailable -> WINDOW_UNAVAILABLE) so loadRanking's error handling below -- in
+// particular its WINDOW_UNAVAILABLE auto-fallback -- needs no changes at all from when this
+// same tagging happened server-side.
+async function getRankingTagged(args) {
+  try {
+    return await getRanking(args, deps);
+  } catch (error) {
+    if (error.notFound) error.code = 'NO_SNAPSHOT';
+    if (error.windowUnavailable) error.code = 'WINDOW_UNAVAILABLE';
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // DOM refs
 // ---------------------------------------------------------------------------
 
 const el = {
+  freshnessReadout: document.getElementById('freshnessReadout'),
   dataDirReadout: document.getElementById('dataDirReadout'),
   statusPill: document.getElementById('statusPill'),
   leagueChips: document.getElementById('leagueChips'),
@@ -170,7 +230,7 @@ function renderChips(container, options, activeValue, onSelect) {
 }
 
 function renderLeagueChips() {
-  const options = state.leagues.map((league) => ({ value: league.id, label: league.name }));
+  const options = LEAGUES.map((league) => ({ value: league.id, label: league.name }));
   renderChips(el.leagueChips, options, state.league, (value) => {
     if (value === state.league) return;
     state.league = value;
@@ -240,10 +300,23 @@ function renderSeasonSelect() {
 }
 
 async function loadSnapshots() {
-  const result = await api(`/api/snapshots?league=${state.league}`);
+  const result = await store.listSnapshotsForLeague({ league: state.league });
   state.snapshotsByLeague.set(state.league, result);
   el.dataDirReadout.textContent = result.dataDir ?? '';
   renderSeasonSelect();
+}
+
+// Shows/hides the capture controls based on whether this page is served locally (where
+// POST /api/update can actually write a new capture to disk) or hosted on Pages (where there is
+// no server at all to write to). Read once from the manifest at init() -- see this file's
+// header comment -- rather than probed, since the manifest is already the first thing loaded.
+function updateCaptureAvailability() {
+  el.captureButton.classList.toggle('hidden', !state.localCapture);
+  el.newSeasonToggle.classList.toggle('hidden', !state.localCapture);
+  if (!state.localCapture) {
+    el.newSeasonForm.classList.add('hidden');
+    el.captureStatus.textContent = 'This is the hosted, read-only site -- data comes from the daily automated capture, not a live click.';
+  }
 }
 
 let captureTimer = null;
@@ -306,7 +379,7 @@ function renderMetaStrip() {
     el.metaStrip.textContent = '--';
     return;
   }
-  const league = state.leagues.find((l) => l.id === meta.league)?.name ?? `League ${meta.league}`;
+  const league = LEAGUES.find((l) => l.id === meta.league)?.name ?? `League ${meta.league}`;
   const parts = [
     `${league}`,
     `Season ${meta.season}`,
@@ -318,6 +391,33 @@ function renderMetaStrip() {
   }
   parts.push(`Shrinkage: ${Math.round(meta.shrinkageMinutes)}min (${meta.shrinkageMode})`);
   el.metaStrip.textContent = parts.join('  ·  ');
+}
+
+let freshnessTimer = null;
+
+// The primary trust signal for the hosted site in particular: makes it obvious the data is
+// already current, so a live refresh (once added) reads as optional rather than something the
+// page seems to be silently missing without it. Re-rendered on a timer (see
+// startFreshnessTimer) purely for a long-open tab -- the underlying capturedAt never changes
+// until the next ranking loads.
+function renderFreshness() {
+  const meta = state.ranking?.meta;
+  if (!meta) {
+    el.freshnessReadout.textContent = '';
+    el.freshnessReadout.title = '';
+    el.freshnessReadout.classList.remove('stale');
+    return;
+  }
+
+  const capturedAt = new Date(meta.capturedAt);
+  el.freshnessReadout.textContent = `Captured ${formatRelativeTime(capturedAt, new Date())}`;
+  el.freshnessReadout.title = capturedAt.toLocaleString();
+  el.freshnessReadout.classList.toggle('stale', Date.now() - capturedAt.getTime() > STALE_CAPTURE_MS);
+}
+
+function startFreshnessTimer() {
+  clearInterval(freshnessTimer);
+  freshnessTimer = setInterval(renderFreshness, FRESHNESS_RERENDER_MS);
 }
 
 function renderExcludedBanner() {
@@ -334,59 +434,81 @@ function renderExcludedBanner() {
   }
 }
 
-// Shared by loadRanking and updateExportLinks -- both need the identical query string, and
-// having two independent builders was already a latent drift bug even before window/shrink
-// grew a third and fourth conditional param between them.
-function buildRankParams() {
-  const params = new URLSearchParams({
-    league: String(state.league),
+// The single shared builder for getRanking's args -- both loadRanking and exportRanking need
+// the identical option set, and having two independent builders was already a latent drift bug
+// even before window/shrink grew a third and fourth conditional field between them. A plain
+// object now (rather than a URLSearchParams query string) since getRanking is called directly
+// in-process, with no HTTP request or requestOptions.js parsing step in between.
+function buildRankArgs() {
+  const args = {
+    league: state.league,
     baseline: state.baseline,
     status: state.status,
-    movement: String(state.movement),
-  });
-  if (state.season !== undefined) params.set('season', String(state.season));
-  if (state.shrinkageMinutes !== null) params.set('shrink', String(state.shrinkageMinutes));
-  if (state.windowGames !== null) params.set('window', String(state.windowGames));
-  return params;
+    movement: state.movement,
+  };
+  if (state.season !== undefined) args.season = state.season;
+  if (state.shrinkageMinutes !== null) args.shrinkageMinutes = state.shrinkageMinutes;
+  if (state.windowGames !== null) args.windowGames = state.windowGames;
+  return args;
 }
 
-function updateExportLinks() {
-  const meta = state.ranking?.meta;
-  if (!meta) return;
-  const params = buildRankParams();
+// Triggers a same-origin download via a synthetic, never-inserted-visibly <a download> click --
+// the standard DOM pattern for turning in-memory content into a file save with no server round
+// trip. The object URL is revoked right after the click so it doesn't linger for the page's
+// lifetime.
+function downloadBlob(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
-  for (const [linkEl, format] of [[el.exportCsv, 'csv'], [el.exportJson, 'json'], [el.exportTable, 'table']]) {
-    const exportParams = new URLSearchParams(params);
-    exportParams.set('format', format);
-    linkEl.href = `/api/export?${exportParams}`;
-  }
+// Same code path as the CLI's --out flag: formatRanking is the exact function
+// `node index.js rank --format=X --out=file` calls, so this export is byte-identical to it for
+// the same league/season/baseline/movement/shrink/window -- see the export caption in
+// index.html. Deliberately reads state.ranking.players (the full, unfiltered/unsorted ranking)
+// rather than whatever the on-screen filter/sort currently shows, matching that same caption.
+function exportRanking(format) {
+  const meta = state.ranking?.meta;
+  if (!meta || !state.ranking) return;
+
+  // top: undefined -- matching the CLI's own unset --top default (Infinity, i.e. every row) --
+  // export has never reflected the on-screen "Rows to show" limiter, by design (see the export
+  // caption in index.html).
+  const formatted = formatRanking(state.ranking.players, { format, top: undefined, meta }, deps);
+  const filename = `pir-league${meta.league}-season${meta.season}.${EXPORT_EXTENSIONS[format]}`;
+  downloadBlob(filename, formatted, EXPORT_CONTENT_TYPES[format]);
 }
 
 async function loadRanking() {
   if (state.season === undefined && !state.snapshotsByLeague.get(state.league)?.seasons.length) {
     state.ranking = null;
     renderMetaStrip();
+    renderFreshness();
     renderTable();
     return;
   }
 
-  state.rankAbortController?.abort();
-  const controller = new AbortController();
-  state.rankAbortController = controller;
+  const requestId = ++state.rankRequestId;
 
   setStatus('busy', 'scoring');
   el.tableWrap.setAttribute('aria-busy', 'true');
 
   try {
-    const params = buildRankParams();
-    const result = await api(`/api/rank?${params}`, { signal: controller.signal });
-    if (controller.signal.aborted) return;
+    const args = buildRankArgs();
+    const result = await getRankingTagged(args);
+    if (requestId !== state.rankRequestId) return; // a newer request has since started
 
-    result.players.forEach((row, index) => { row.rank = index + 1; });
-    state.ranking = result;
+    // Rank is tracked by id, out of band from the row objects themselves -- see state.rankById's
+    // own comment for why this replaced mutating a `rank` field directly onto each row.
+    state.rankById = new Map(result.ranked.map((row, index) => [row.id, index + 1]));
+    state.ranking = { meta: result.meta, players: result.ranked, excluded: result.excluded };
     hideError();
   } catch (error) {
-    if (error.name === 'AbortError') return;
+    if (requestId !== state.rankRequestId) return;
 
     if (error.code === 'WINDOW_UNAVAILABLE') {
       // An unmet precondition (not enough captures, or too noisy a window), not a bug --
@@ -397,10 +519,8 @@ async function loadRanking() {
       state.windowGames = null;
       el.windowSelect.value = '';
       hideError();
-      if (!controller.signal.aborted) {
-        setStatus('ready', 'idle');
-        el.tableWrap.setAttribute('aria-busy', 'false');
-      }
+      setStatus('ready', 'idle');
+      el.tableWrap.setAttribute('aria-busy', 'false');
       await loadRanking();
       el.windowNote.textContent = error.message;
       return;
@@ -409,15 +529,15 @@ async function loadRanking() {
     state.ranking = null;
     showError(error);
   } finally {
-    if (!controller.signal.aborted) {
+    if (requestId === state.rankRequestId) {
       setStatus('ready', 'idle');
       el.tableWrap.setAttribute('aria-busy', 'false');
     }
   }
 
   renderMetaStrip();
+  renderFreshness();
   renderExcludedBanner();
-  updateExportLinks();
   updateWindowAvailability();
   updateMovementAvailability();
   renderTable();
@@ -450,9 +570,9 @@ function updateMovementAvailability() {
 }
 
 // Mirrors updateMovementAvailability's shape: derived from captureCount (already returned by
-// /api/snapshots, so this needs no new server call), disables the control with a stated
-// reason, and forces state back to a safe value when the current selection stops being valid
-// (e.g. switching to a season with only one capture while "last ~12 games" was selected).
+// store.listSnapshotsForLeague, so this needs no additional fetch), disables the control with a
+// stated reason, and forces state back to a safe value when the current selection stops being
+// valid (e.g. switching to a season with only one capture while "last ~12 games" was selected).
 function updateWindowAvailability() {
   const snapshotInfo = state.snapshotsByLeague.get(state.league);
   const active = snapshotInfo?.seasons.find((s) => s.season === state.season);
@@ -560,7 +680,9 @@ function renderRow(row, columns) {
   tr.dataset.id = String(row.id);
 
   const cells = {
-    rank: String(row.rank),
+    // Read from rankById (keyed by player id), never from the row itself -- see
+    // state.rankById's comment for why the row objects no longer carry a mutated `rank` field.
+    rank: String(state.rankById.get(row.id) ?? ''),
     mvmt: formatRankMovement(row),
     name: row.name,
     position: row.position,
@@ -610,7 +732,15 @@ function renderTable() {
     ? `Showing ${limited.length} of ${allPlayers.length} skaters`
     : '';
 
-  if (allPlayers.length === 0 && state.ranking) {
+  // Checked in this order deliberately: "nothing has ever been captured" must win over "the
+  // filter matched nothing", since an empty ranking always makes limited.length === 0 too --
+  // without this ordering, a fresh page load with zero captures (the hosted site's actual
+  // first-deploy state) would show "No skaters match this filter" instead of the real reason.
+  if (!state.ranking) {
+    showEmptyState('no-ranking');
+    return;
+  }
+  if (allPlayers.length === 0) {
     showEmptyState('no-snapshot-or-empty');
     return;
   }
@@ -648,15 +778,21 @@ function showEmptyState(kind) {
     return;
   }
 
-  if (!state.ranking) {
-    const suggestion = `node index.js update --league=${state.league}${state.season !== undefined ? ` --season=${state.season}` : ''}`;
-    el.emptyState.appendChild(textEl('p', null, 'No snapshot captured yet for this league/season.'));
-    el.emptyState.appendChild(textEl('code', 'empty-state-cmd', suggestion));
-  } else {
-    // No longer just "no ice time or no games played" -- a --status filter (see the excluded
-    // banner above for the per-player breakdown) can just as easily be why nobody's left.
-    el.emptyState.appendChild(textEl('p', null, 'Every skater in this snapshot was excluded from scoring or filtered out (see above).'));
+  if (kind === 'no-ranking') {
+    if (state.localCapture) {
+      const suggestion = `node index.js update --league=${state.league}${state.season !== undefined ? ` --season=${state.season}` : ''}`;
+      el.emptyState.appendChild(textEl('p', null, 'No snapshot captured yet for this league/season.'));
+      el.emptyState.appendChild(textEl('code', 'empty-state-cmd', suggestion));
+    } else {
+      el.emptyState.appendChild(textEl('p', null, 'No snapshot captured yet for this league/season -- check back after the next automated capture.'));
+    }
+    return;
   }
+
+  // kind === 'no-snapshot-or-empty': a ranking WAS loaded (state.ranking is truthy here -- see
+  // renderTable's guard order), but every skater in it was excluded from scoring or filtered
+  // out by a --status option (see the excluded banner above for the per-player breakdown).
+  el.emptyState.appendChild(textEl('p', null, 'Every skater in this snapshot was excluded from scoring or filtered out (see above).'));
 }
 
 // ---------------------------------------------------------------------------
@@ -775,23 +911,38 @@ function wireEvents() {
     hideError();
     lastFailedAction?.();
   });
+
+  for (const [linkEl, format] of [[el.exportCsv, 'csv'], [el.exportJson, 'json'], [el.exportTable, 'table']]) {
+    linkEl.addEventListener('click', (event) => {
+      event.preventDefault();
+      exportRanking(format);
+    });
+  }
 }
 
 async function init() {
   wireEvents();
   renderBaselineChips();
   renderPositionChips();
+  state.league = LEAGUES[0]?.id ?? 0;
 
   try {
-    const { leagues } = await api('/api/leagues');
-    state.leagues = leagues;
-  } catch {
-    state.leagues = LEAGUES_FALLBACK;
+    const manifest = await store.loadManifest();
+    el.dataDirReadout.textContent = manifest.dataDir ?? '';
+    state.localCapture = manifest.localCapture === true;
+  } catch (error) {
+    // No manifest at all (a broken deploy, or a network hiccup on first load) is worse than a
+    // stale one -- surface it plainly rather than silently rendering an empty panel that looks
+    // like "nothing has ever been captured".
+    state.localCapture = false;
+    showError(new Error(`Couldn't load the capture index: ${error.message}`));
   }
-  state.league = state.leagues[0]?.id ?? 0;
+  updateCaptureAvailability();
 
   lastFailedAction = refreshSnapshotsAndRanking;
   await refreshSnapshotsAndRanking();
+
+  startFreshnessTimer();
 }
 
 init();
